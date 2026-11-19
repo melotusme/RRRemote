@@ -133,16 +133,21 @@ RRRemote/
   - `TCP 21115, 21116, 21118` & `UDP 21116`：`hbbs`（NAT 类型测试、ID 注册/心跳/打洞、WebSocket）
   - `TCP 21117, 21119`：`hbbr`（中继流量与 WebSocket 中继）
 
-### 4.3 客户端源码定制 (`custom/apply_custom.py`)
-在 GitHub Actions 检出 `rustdesk/rustdesk@1.5.3`（含 `libs/hbb_common` 等子模块）之后、编译之前自动执行，完成三项无侵入定制：
+### 4.3 客户端源码定制 (`custom/apply_custom.py` + `custom/apply_ui_polish.py`)
+在 GitHub Actions 检出 `rustdesk/rustdesk@1.5.3`（含 `libs/hbb_common` 等子模块）之后、编译之前自动执行，完成四项无侵入定制：
 
-1. **内置自动更新指向个人仓库**：
-   - 修改 `src/common.rs` 中的 `release_id_from_update_url()`，允许校验 `https://github.com/<owner>/<repo>/releases/tag/<release_id>`。
-   - 重写 `do_check_software_update()`，直接向 `https://api.github.com/repos/melotusme/RRRemote/releases/latest` 发起 GET 请求，解析 `html_url` 并复用原生事件通道向 Flutter UI 触发新版本提示。
+1. **零限流内置自动更新（直连 GitHub `/releases/latest` 重定向）**：
+   - 修改 `src/common.rs` 中的 `release_id_from_update_url()`，允许校验 `https://github.com/<owner>/<repo>/releases/tag/<release_id>`，并在 `display_version_from_release_id()` 兼容 `-rrN` 自定义修订后缀。
+   - 重写 `do_check_software_update()`，直接请求 `https://github.com/melotusme/RRRemote/releases/latest` 跟随 302 重定向获取最终 Tag URL，彻底绕开匿名 `api.github.com` 60 次/小时 403 限流。
 2. **可选编译期默认服务器注入（兼容私有/公开双模式）**：
-   - 仅当环境变量 `RR_RENDEZVOUS_SERVER` / `RR_PUB_KEY` / `RR_API_SERVER` 非空时，才替换 `libs/hbb_common/src/config.rs` 中的默认常量；为空时保持纯净通用构建。
+   - 仅当环境变量 `RR_RENDEZVOUS_SERVER` / `RR_PUB_KEY` / `RR_API_SERVER` 非空时，才替换 `libs/hbb_common/src/config.rs` 中的默认常量；Public 仓库默认留空，防止公开安装包暴露个人私服。
    - **始终保留客户端 UI 中的「设置 -> 网络 -> ID/中继服务器」**，保证用户随时可更换打洞服务器。
-3. **品牌展示名定制**：
+3. **工业级 UI 设计系统与多端易用性升级 (`custom/apply_ui_polish.py`)**：
+   - **Obsidian Slate（深色）与 Crisp Alabaster（浅色）视觉体系**：修复上游 `ColorThemeExtension.lerp` 5 处插值 bug，统一 `#2563EB` 现代品牌蓝、1px 精细描边与 `8/10/12/14px` 圆角层级，替换土味随机卡片背景色为 8 色精选低饱和工业调色盘。
+   - **主控端效率提升（对齐 UU 远程手感）**：桌面设备卡片新增悬浮**一键直连胶囊按钮**（单击即连、保留双击）、升级带柔光晕的 Emerald 在线状态灯（离线采用沉稳石板灰取代刺眼橙黄）、主控远程悬浮工具栏胶囊圆角化（`10px`）、默认开启自适应缩放（`view-style = adaptive`）与实时质量监控（`show-quality-monitor = Y`）。
+   - **被控端与自建服务器易用性**：左侧被控栏拓宽至 `228px`、ID/密码全面启用等宽数字排版（`FontFeature.tabularFigures()`）并增加直观的**一键复制 ID 按钮**；彻底移除辣眼芭比粉渐变卡与 `rustdesk.com/pricing` 商业广告链接，替换为克制深蓝磨砂卡与底部状态栏常驻的**「ID/Relay Server」一键直达入口**。
+   - **移动端（Android / iOS）细节打磨**：替换刺眼粉色更新栏为品牌蓝圆角提示条并指向本仓库 Release、为远程 ID 输入卡与底部导航栏增加精致 1px 描边与分隔线。
+4. **品牌展示名定制**：
    - 替换 Flutter 桌面标题与 Windows Runner 窗口标题为 `RRRemote`，同时保持底层服务名与打包目录结构与上游兼容，避免破坏各平台系统服务注册与安装包脚本。
 
 ### 4.4 全平台 GitHub Actions CI/CD (`.github/workflows/build-rrremote.yml`)

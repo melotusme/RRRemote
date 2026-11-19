@@ -40,8 +40,33 @@ VERSION_FILE="${STATE_DIR}/installed_tag.txt"
 mkdir -p "${STATE_DIR}"
 
 fetch_release_json() {
-  curl -fsSL -H "User-Agent: RRRemote-Installer" -H "Accept: application/vnd.github+json" \
-    "https://api.github.com/repos/$1/releases/latest"
+  local repo="$1"
+  local api_json
+  api_json="$(curl -fsSL -H "User-Agent: RRRemote-Installer" -H "Accept: application/vnd.github+json" \
+    "https://api.github.com/repos/${repo}/releases/latest" 2>/dev/null || true)"
+  if [[ -n "${api_json}" ]]; then
+    printf '%s' "${api_json}"
+    return 0
+  fi
+  # Zero-rate-limit fallback via GitHub web redirect + expanded_assets
+  local loc tag html
+  loc="$(curl -fsSI -H "User-Agent: RRRemote-Installer" "https://github.com/${repo}/releases/latest" | awk 'tolower($1)=="location:"{print $2}' | tr -d '\r\n')"
+  tag="${loc##*/}"
+  [[ -n "${tag}" ]] || return 1
+  html="$(curl -fsSL -H "User-Agent: RRRemote-Installer" "https://github.com/${repo}/releases/expanded_assets/${tag}")"
+  printf '%s' "${html}" | python3 -c '
+import json, re, sys
+tag = sys.argv[1]
+html = sys.stdin.read()
+seen = set()
+assets = []
+for m in re.finditer(r"href=\"(/[^\"\x27]+/releases/download/[^\"\x27]+)\"", html):
+    rel = m.group(1)
+    if rel not in seen:
+        seen.add(rel)
+        assets.append({"name": rel.rsplit("/", 1)[-1], "browser_download_url": "https://github.com" + rel})
+print(json.dumps({"tag_name": tag, "assets": assets}))
+' "${tag}"
 }
 
 USED_REPO="${REPO}"

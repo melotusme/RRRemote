@@ -34,7 +34,50 @@ function Get-LatestRelease {
         UseBasicParsing = $true
     }
     if ($Proxy) { $params["Proxy"] = $Proxy }
-    return Invoke-RestMethod @params
+    try {
+        return Invoke-RestMethod @params
+    } catch {
+        # Fallback to zero-rate-limit GitHub web redirect + expanded_assets HTML
+        Write-Warning "GitHub API unavailable or rate-limited; falling back to web release redirect..."
+        $webParams = @{
+            Uri             = "https://github.com/$TargetRepo/releases/latest"
+            Headers         = @{ "User-Agent" = "RRRemote-Installer" }
+            UseBasicParsing = $true
+        }
+        if ($Proxy) { $webParams["Proxy"] = $Proxy }
+        $resp = Invoke-WebRequest @webParams
+        $finalUri = if ($resp.BaseResponse.ResponseUri) { $resp.BaseResponse.ResponseUri.AbsoluteUri } else { "" }
+        if ($finalUri -match "/releases/tag/([^/?#]+)") {
+            $tagName = $Matches[1]
+        } else {
+            throw "Could not resolve latest release tag from $finalUri"
+        }
+        $assetsParams = @{
+            Uri             = "https://github.com/$TargetRepo/releases/expanded_assets/$tagName"
+            Headers         = @{ "User-Agent" = "RRRemote-Installer" }
+            UseBasicParsing = $true
+        }
+        if ($Proxy) { $assetsParams["Proxy"] = $Proxy }
+        $html = (Invoke-WebRequest @assetsParams).Content
+        $matches = [regex]::Matches($html, 'href="(/[^"]+/releases/download/[^"]+)"')
+        $assets = @()
+        $seen = @{}
+        foreach ($m in $matches) {
+            $relUrl = $m.Groups[1].Value
+            if (-not $seen.ContainsKey($relUrl)) {
+                $seen[$relUrl] = $true
+                $fname = Split-Path -Leaf $relUrl
+                $assets += [pscustomobject]@{
+                    name                 = $fname
+                    browser_download_url = "https://github.com$relUrl"
+                }
+            }
+        }
+        return [pscustomobject]@{
+            tag_name = $tagName
+            assets   = $assets
+        }
+    }
 }
 
 $release = $null

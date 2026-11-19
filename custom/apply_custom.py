@@ -2,15 +2,20 @@
 """
 Apply RRRemote customizations to a checked-out upstream RustDesk source tree.
 
-All sensitive values (rendezvous server, public key, API server) are read ONLY
-from environment variables (e.g. GitHub Actions Secrets) at build time and are
-never stored in this repository.
+1. Optional build-time server defaults (read ONLY from environment variables,
+   never stored in this repository).
+2. Zero-rate-limit built-in update checker using GitHub's `/releases/latest`
+   HTTPS redirect (avoids anonymous api.github.com 403 rate limits) and
+   supports `-rrN` custom release suffixes.
+3. Display branding (RRRemote) + industrial-grade UI/UX polish via
+   `apply_ui_polish.py`.
 """
 
 from __future__ import annotations
 
 import os
 import re
+import subprocess
 import sys
 from pathlib import Path
 
@@ -58,8 +63,6 @@ def patch_hbb_common_config(root: Path, rendezvous: str, pub_key: str, api_serve
         print("[rrremote] Injected default RS_PUB_KEY from environment.")
 
     if api_server:
-        # Optional default API server fallback when local option is empty.
-        # Kept non-destructive so users can always override API server in Settings UI.
         pattern = r'pub const OPTION_API_SERVER:\s*&str\s*=\s*"api-server";'
         if re.search(pattern, content) and "RRREMOTE_DEFAULT_API_SERVER" not in content:
             replacement = (
@@ -75,7 +78,7 @@ def patch_hbb_common_config(root: Path, rendezvous: str, pub_key: str, api_serve
 
 
 def patch_update_checker(root: Path, update_repo: str) -> None:
-    """Redirect built-in update check to GitHub Releases of update_repo (owner/repo)."""
+    """Redirect built-in update check to GitHub `/releases/latest` (zero API rate limit)."""
     if "/" not in update_repo:
         raise ValueError(f"Invalid UPDATE_REPO: {update_repo!r}, expected 'owner/repo'")
     owner, repo = update_repo.split("/", 1)
@@ -103,18 +106,27 @@ def patch_update_checker(root: Path, update_repo: str) -> None:
     elif f'["{owner}", "{repo}", "releases", "tag"' in content:
         print(f"[rrremote] release_id_from_update_url already patched for {owner}/{repo}.")
     else:
-        print("[rrremote] Warning: release_id_from_update_url pattern not matched; skipping.")
+        raise RuntimeError("release_id_from_update_url pattern not matched in src/common.rs")
 
-    # 2. Patch do_check_software_update to query GitHub Releases latest API directly
-    gh_api_url = f"https://api.github.com/repos/{owner}/{repo}/releases/latest"
+    # 2. Strip optional -rrN suffix in display_version_from_release_id (e.g. v1.5.3-rr2 -> 1.5.3)
+    old_strip = "let display_version = release_id.strip_prefix('v').unwrap_or(release_id);"
+    new_strip = (
+        "let display_version = release_id.strip_prefix('v').unwrap_or(release_id)\n"
+        "        .split('-').next().unwrap_or(release_id);"
+    )
+    if old_strip in content and ".split('-').next()" not in content:
+        content = content.replace(old_strip, new_strip, 1)
+        print("[rrremote] Updated display_version_from_release_id to support -rrN suffixes.")
+
+    # 3. Query https://github.com/<owner>/<repo>/releases/latest via HTTP redirect (no API 403 limit)
+    latest_web_url = f"https://github.com/{owner}/{repo}/releases/latest"
     fn_marker = "pub async fn do_check_software_update() -> hbb_common::ResultType<()> {"
-    if fn_marker in content and gh_api_url not in content:
+    if fn_marker in content and latest_web_url not in content:
         start = content.index(fn_marker)
-        # Find the next top-level function marker (#[inline] right after do_check_software_update)
         end_marker = "\n#[inline]\npub fn get_app_name()"
         end = content.index(end_marker, start)
         custom_fn = f'''pub async fn do_check_software_update() -> hbb_common::ResultType<()> {{
-    let url = "{gh_api_url}";
+    let url = "{latest_web_url}";
     let proxy_conf = Config::get_socks();
     let tls_url = get_url_for_tls(url, &proxy_conf);
     let tls_type = get_cached_tls_type(tls_url);
@@ -124,7 +136,6 @@ def patch_update_checker(root: Path, update_repo: str) -> None:
     let resp_res: ResultType<_> = match client
         .get(url)
         .header("User-Agent", "RRRemote-Updater")
-        .header("Accept", "application/vnd.github+json")
         .send()
         .await
     {{
@@ -136,7 +147,6 @@ def patch_update_checker(root: Path, update_repo: str) -> None:
                 match client
                     .get(url)
                     .header("User-Agent", "RRRemote-Updater")
-                    .header("Accept", "application/vnd.github+json")
                     .send()
                     .await
                 {{
@@ -155,21 +165,11 @@ def patch_update_checker(root: Path, update_repo: str) -> None:
             if !status.is_success() {{
                 Err(anyhow!("RRRemote update check failed with HTTP status: {{status}}"))
             }} else {{
-                let body = response.bytes().await?;
-                let json: serde_json::Value = serde_json::from_slice(&body)?;
-                let html_url = json
-                    .get("html_url")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or_default()
-                    .to_owned();
-                if html_url.is_empty() {{
-                    Err(anyhow!("GitHub release response missing html_url"))
-                }} else {{
-                    let payload = serde_json::to_vec(&hbb_common::VersionCheckResponse {{
-                        url: html_url,
-                    }})?;
-                    process_software_update_check_response(Bytes::from(payload))
-                }}
+                let final_url = response.url().as_str().to_owned();
+                let payload = serde_json::to_vec(&hbb_common::VersionCheckResponse {{
+                    url: final_url,
+                }})?;
+                process_software_update_check_response(Bytes::from(payload))
             }}
         }}
         Err(err) => Err(err),
@@ -181,20 +181,18 @@ def patch_update_checker(root: Path, update_repo: str) -> None:
 }}
 '''
         content = content[:start] + custom_fn + content[end:]
-        print(f"[rrremote] Redirected built-in update checker to {gh_api_url}.")
+        print(f"[rrremote] Redirected built-in update checker to {latest_web_url} (zero API rate limit).")
 
     write_text(common_rs, content)
 
 
 def patch_default_api_server_fallback(root: Path, api_server: str) -> None:
-    """When user hasn't explicitly configured an API server, fall back to RR_API_SERVER."""
     if not api_server:
         return
     common_rs = root / "src" / "common.rs"
     content = read_text(common_rs)
     marker = 'pub fn get_api_server(custom: String) -> String {'
     if marker in content and "RRREMOTE_DEFAULT_API_SERVER" not in content:
-        # Insert fallback right before returning empty string in get_api_server if present
         idx = content.index(marker)
         snippet = content[idx : idx + 1200]
         if 'return "".to_owned();' in snippet:
@@ -209,11 +207,9 @@ def patch_default_api_server_fallback(root: Path, api_server: str) -> None:
 
 
 def patch_display_branding(root: Path, display_name: str) -> None:
-    """Customize user-visible window title without breaking upstream packaging paths."""
     if not display_name or display_name == "RustDesk":
         return
 
-    # Flutter desktop window title (macOS/Windows/Linux UI title)
     flutter_main = root / "flutter" / "lib" / "main.dart"
     if flutter_main.exists():
         txt = read_text(flutter_main)
@@ -223,7 +219,6 @@ def patch_display_branding(root: Path, display_name: str) -> None:
             write_text(flutter_main, updated)
             print(f"[rrremote] Updated Flutter app title to {display_name}.")
 
-    # Windows runner window title
     win_main = root / "flutter" / "windows" / "runner" / "main.cpp"
     if win_main.exists():
         txt = read_text(win_main)
@@ -253,7 +248,13 @@ def main() -> int:
     patch_default_api_server_fallback(root, api_server)
     patch_display_branding(root, display_name)
 
-    print("[rrremote] Customization complete.")
+    ui_script = Path(__file__).resolve().parent / "apply_ui_polish.py"
+    if ui_script.exists():
+        env = os.environ.copy()
+        env["UPDATE_REPO"] = update_repo
+        subprocess.run([sys.executable, str(ui_script), str(root)], check=True, env=env)
+
+    print("[rrremote] All customizations applied successfully.")
     return 0
 
 

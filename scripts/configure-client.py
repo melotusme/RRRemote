@@ -26,10 +26,13 @@ def candidate_config_paths() -> list[Path]:
         appdata = os.environ.get("APPDATA")
         if appdata:
             paths.append(Path(appdata) / "RustDesk" / "config" / "RustDesk2.toml")
-        # Windows Service profile (LocalSystem) when installed as a system service
-        svc_cfg = Path(r"C:\Windows\ServiceProfiles\LocalService\AppData\Roaming\RustDesk\config\RustDesk2.toml")
-        if svc_cfg.parent.exists():
-            paths.append(svc_cfg)
+        # Windows Service profiles (LocalSystem is the default service account, plus LocalService)
+        for svc_cfg in (
+            Path(r"C:\Windows\System32\config\systemprofile\AppData\Roaming\RustDesk\config\RustDesk2.toml"),
+            Path(r"C:\Windows\ServiceProfiles\LocalService\AppData\Roaming\RustDesk\config\RustDesk2.toml"),
+        ):
+            if svc_cfg.parent.exists() or svc_cfg.parent.parent.exists():
+                paths.append(svc_cfg)
     elif system == "Darwin":
         paths.append(home / "Library" / "Preferences" / "com.carriez.RustDesk" / "RustDesk2.toml")
     else:
@@ -111,7 +114,14 @@ def update_file(path: Path, server: str, relay: str, key: str, api_server: str, 
         content = upsert_toml_option(content, "api-server", api_server)
     if direct_ip:
         content = upsert_toml_option(content, "direct-server", "Y")
+    content = upsert_toml_option(content, "stop-service", "")
     content = upsert_toml_option(content, "av1-test", "N")
+    # Optimal controller/host ergonomics out of the box
+    content = upsert_toml_option(content, "view-style", "adaptive")
+    content = upsert_toml_option(content, "show-quality-monitor", "Y")
+    content = upsert_toml_option(content, "enable-audio", "Y")
+    content = upsert_toml_option(content, "enable-clipboard", "Y")
+    content = upsert_toml_option(content, "enable-file-transfer", "Y")
 
     path.write_text(content, encoding="utf-8", newline="\n")
     print(f"[rrremote] Updated config: {path}")
