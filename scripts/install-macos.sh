@@ -57,10 +57,10 @@ if [[ -z "${RELEASE_JSON}" ]]; then
   exit 1
 fi
 
-PARSED="$(python3 - "${ASSET_REGEX}" <<PY
+PARSED="$(printf '%s' "${RELEASE_JSON}" | python3 -c '
 import json, re, sys
 pattern = re.compile(sys.argv[1])
-data = json.loads('''${RELEASE_JSON}''')
+data = json.load(sys.stdin)
 tag = data.get("tag_name", "")
 url = ""
 name = ""
@@ -73,8 +73,7 @@ for a in data.get("assets", []):
 print(tag)
 print(name)
 print(url)
-PY
-)"
+' "${ASSET_REGEX}")"
 
 TAG="$(echo "${PARSED}" | sed -n '1p')"
 ASSET_NAME="$(echo "${PARSED}" | sed -n '2p')"
