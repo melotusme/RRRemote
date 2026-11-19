@@ -122,12 +122,21 @@ if ($currentTag -ne $tag) {
     Invoke-WebRequest @dlParams
 
     Write-Host "[rrremote] Installing $($asset.name)..."
+    $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+    $startParams = @{ PassThru = $true }
+    if (-not $isAdmin) { $startParams["Verb"] = "RunAs" }
+
     if ($asset.name -like "*.msi") {
-        Start-Process msiexec.exe -ArgumentList @("/i", "`"$dlPath`"", "/qn", "/norestart") -Wait
+        $proc = Start-Process msiexec.exe -ArgumentList @("/i", "`"$dlPath`"", "/qn", "/norestart") @startParams
+        $proc.WaitForExit()
     } else {
-        $proc = Start-Process -FilePath $dlPath -ArgumentList @("--silent-install") -PassThru
+        $proc = Start-Process -FilePath $dlPath -ArgumentList @("--silent-install") @startParams
         # Wait up to 90s because silent-install may keep child service handles open
         $null = $proc.WaitForExit(90000)
+    }
+
+    if (-not (Test-Path "C:\Program Files\RustDesk\rustdesk.exe")) {
+        throw "Installation verification failed: C:\Program Files\RustDesk\rustdesk.exe not found"
     }
 
     Set-Content -Path $VersionFile -Value $tag -Encoding UTF8
