@@ -9,6 +9,8 @@ Personal, self-hosted, cross-platform remote desktop solution built on top of op
 - **Android (arm64)**: Controller + Host (`.apk`)
 - **iOS (arm64)**: Controller (unsigned `.ipa` for sideloading / Xcode signing); Phase 2 adds ReplayKit + WebRTC view-only screen sharing (see [docs/ios-screen-share-roadmap.md](docs/ios-screen-share-roadmap.md))
 
+For full technical design, CI details, and implementation notes, see [docs/ARCHITECTURE_AND_IMPLEMENTATION.md](docs/ARCHITECTURE_AND_IMPLEMENTATION.md).
+
 ## Architecture
 ```text
 +--------------------+         P2P Hole Punching (TCP/UDP)         +--------------------+
