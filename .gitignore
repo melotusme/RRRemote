@@ -1,0 +1,36 @@
+# Local secrets and personal deployment configs (NEVER commit)
+.env
+.env.*
+!.env.example
+.local/
+*.local
+*.local.*
+*.secret
+*.secrets
+*id_ed25519*
+*.key
+*.pem
+*.p12
+*.jks
+*.keystore
+*.mobileprovision
+*.pub
+config.yaml
+!config.yaml.example
+machines.json
+
+# Build & upstream working directories
+upstream/
+build/
+dist/
+target/
+out/
+
+# Editor / tool local state
+.serena/
+.DS_Store
+Thumbs.db
+__pycache__/
+*.pyc
+.vscode/
+.idea/
