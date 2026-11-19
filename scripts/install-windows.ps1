@@ -82,7 +82,9 @@ if ($currentTag -ne $tag) {
     if ($asset.name -like "*.msi") {
         Start-Process msiexec.exe -ArgumentList @("/i", "`"$dlPath`"", "/qn", "/norestart") -Wait
     } else {
-        Start-Process -FilePath $dlPath -ArgumentList @("--silent-install") -Wait
+        $proc = Start-Process -FilePath $dlPath -ArgumentList @("--silent-install") -PassThru
+        # Wait up to 90s because silent-install may keep child service handles open
+        $null = $proc.WaitForExit(90000)
     }
 
     Set-Content -Path $VersionFile -Value $tag -Encoding UTF8

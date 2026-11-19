@@ -103,6 +103,7 @@ if [[ "${CURRENT_TAG}" != "${DESIRED_TAG}" ]]; then
   rm -rf "/Applications/${APP_NAME}"
   cp -R "${APP_SRC}" "/Applications/${APP_NAME}"
   xattr -dr com.apple.quarantine "/Applications/${APP_NAME}" 2>/dev/null || true
+  codesign --force --deep --sign - "/Applications/${APP_NAME}" 2>/dev/null || true
   hdiutil detach "${MOUNT_POINT}" -quiet || true
 
   echo "${DESIRED_TAG}" > "${VERSION_FILE}"
