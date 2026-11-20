@@ -244,10 +244,10 @@ jobs:
         env:
           VCPKG_DEFAULT_HOST_TRIPLET: ${{ matrix.job.vcpkg-triplet }}
         run: |
-          if ! $VCPKG_ROOT/vcpkg \
-            install \
-            --triplet ${{ matrix.job.vcpkg-triplet }} \
-            --x-install-root="$VCPKG_ROOT/installed"; then
+          install_vcpkg() {
+            $VCPKG_ROOT/vcpkg install --triplet ${{ matrix.job.vcpkg-triplet }} --x-install-root="$VCPKG_ROOT/installed"
+          }
+          if ! (install_vcpkg || install_vcpkg); then
             find "${VCPKG_ROOT}/" -name "*.log" | while read -r _1; do
               echo "$_1:"
               echo "======"
@@ -267,21 +267,24 @@ jobs:
         shell: bash
         run: echo "SODIUM_LIB_DIR=$VCPKG_ROOT/installed/${{ matrix.job.vcpkg-triplet }}/lib" >> "$GITHUB_ENV"
 
-      - name: Build rustdesk
+      - name: Build RRRemote
         run: |
-          # Windows: build RustDesk
+          # Windows: build RRRemote
           # --hwcodec is shared by all Windows targets; per-target extras (e.g. --vram) come from the matrix
           python3 .\build.py --portable --flutter --skip-portable-pack --hwcodec ${{ matrix.job.build-args }}
-          mv ./flutter/build/windows/${{ matrix.job.flutter-arch }}/runner/Release ./rustdesk
+          mv ./flutter/build/windows/${{ matrix.job.flutter-arch }}/runner/Release ./rrremote
+          if (-not (Test-Path "./rrremote/RRRemote.exe") -and (Test-Path "./rrremote/rustdesk.exe")) {
+            mv -Force ./rrremote/rustdesk.exe ./rrremote/RRRemote.exe
+          }
 
-          # Download usbmmidd_v2.zip and extract it to ./rustdesk
+          # Download usbmmidd_v2.zip and extract it to ./rrremote
           Invoke-WebRequest -Uri https://github.com/rustdesk-org/rdev/releases/download/usbmmidd_v2/usbmmidd_v2.zip -OutFile usbmmidd_v2.zip
           Expand-Archive usbmmidd_v2.zip -DestinationPath .
           Remove-Item -Path usbmmidd_v2\Win32 -Recurse
           Remove-Item -Path "usbmmidd_v2\deviceinstaller64.exe", "usbmmidd_v2\deviceinstaller.exe", "usbmmidd_v2\usbmmidd.bat"
-          mv -Force .\usbmmidd_v2 ./rustdesk
+          mv -Force .\usbmmidd_v2 ./rrremote
 
-          # Download printer driver files and extract them to ./rustdesk
+          # Download printer driver files and extract them to ./rrremote
           try {
             Invoke-WebRequest -Uri https://github.com/rustdesk/hbb_common/releases/download/driver/rustdesk_printer_driver_v4-1.4.zip -OutFile rustdesk_printer_driver_v4-1.4.zip
             Invoke-WebRequest -Uri https://github.com/rustdesk/hbb_common/releases/download/driver/printer_driver_adapter.zip -OutFile printer_driver_adapter.zip
@@ -295,10 +298,10 @@ jobs:
             if ($checksum_driver -eq $downloadsum_driver.Hash -and $checksum_adapter -eq $downloadsum_adapter.Hash) {
                 Write-Output "rustdesk_printer_driver_v4-1.4, checksums match, extract the file."
                 Expand-Archive rustdesk_printer_driver_v4-1.4.zip -DestinationPath .
-                mkdir ./rustdesk/drivers
-                mv -Force .\rustdesk_printer_driver_v4-1.4 ./rustdesk/drivers/RustDeskPrinterDriver
+                mkdir ./rrremote/drivers
+                mv -Force .\rustdesk_printer_driver_v4-1.4 ./rrremote/drivers/RustDeskPrinterDriver
                 Expand-Archive printer_driver_adapter.zip -DestinationPath .
-                mv -Force .\printer_driver_adapter.dll ./rustdesk
+                mv -Force .\printer_driver_adapter.dll ./rrremote
             } elseif ($checksum_driver -ne $downloadsum_driver.Hash) {
                 Write-Output "rustdesk_printer_driver_v4-1.4, checksums do not match, ignore the file."
             } else {
@@ -340,14 +343,14 @@ jobs:
         if: true
         with:
           name: ${{ matrix.job.arch == 'aarch64' && 'topmostwindow-artifacts-ARM64' || 'topmostwindow-artifacts-x64' }}
-          path: "./rustdesk"
+          path: "./rrremote"
 
       - name: Upload unsigned
         if: env.UPLOAD_ARTIFACT == 'true'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: rustdesk-unsigned-windows-${{ matrix.job.arch }}
-          path: rustdesk
+          name: rrremote-unsigned-windows-${{ matrix.job.arch }}
+          path: rrremote
 
       - name: Sign rustdesk files
         if: env.UPLOAD_ARTIFACT == 'true' && env.SIGN_BASE_URL != '-2'
@@ -406,7 +409,7 @@ jobs:
           sed -i '/dpiAware/d' res/manifest.xml
           pushd ./libs/portable
           pip3 install -r requirements.txt
-          python3 ./generate.py -f ../../rustdesk/ -o . -e ../../rustdesk/rustdesk.exe
+          python3 ./generate.py -f ../../rrremote/ -o . -e ../../rrremote/RRRemote.exe
           popd
           mkdir -p ./SignOutput
           mv ./target/release/rustdesk-portable-packer.exe ./SignOutput/rrremote-${{ env.VERSION }}-${{ matrix.job.arch }}.exe
@@ -421,13 +424,11 @@ jobs:
           msbuild-architecture: ${{ matrix.job.arch == 'aarch64' && 'arm64' || 'x86' }}
 
       - name: Build msi
-        # Builds the MSI for the matrix arch. res/msi (WiX v4 + native CustomActions) carries
-        # both x64 and ARM64 platform configs; WcaUtil/DUtil ship arm64 libs. msbuild platform
-        # is x64 / ARM64; the produced Package.msi is globbed since its bin/<platform>/ dir varies.
+        # Builds the native RRRemote MSI for the matrix arch.
         if: env.UPLOAD_ARTIFACT == 'true'
         run: |
           pushd ./res/msi
-          python preprocess.py --arp -d ../../rustdesk
+          python preprocess.py --arp -d ../../rrremote --app-name RRRemote
           nuget restore msi.sln
           $msiPlatform = if ('${{ matrix.job.arch }}' -eq 'aarch64') { 'ARM64' } else { 'x64' }
           msbuild msi.sln -p:Configuration=Release -p:Platform=$msiPlatform /p:TargetVersion=Windows10
@@ -436,24 +437,7 @@ jobs:
           sha256sum ../../SignOutput/rrremote-*.msi
 
       - name: Build pre-built MSI template
-        # Two things this works around: preprocess.py rewrites res/msi in place, so the
-        # tree is reset around this second variant; and it locates the app as
-        # <app-name>.exe inside the dist, so the dist copy is renamed to match.
-        #
-        # The placeholder is chosen to keep this template as close to the shipped msi as
-        # possible: eight characters like "RustDesk", and a valid 8.3 name, so WiX
-        # derives no short name for it. A longer placeholder would get one, and a patch
-        # cannot rewrite a truncated placeholder, leaving short names pointing at it.
-        #
-        # It still has to be unique, which is why "RustDesk" itself cannot be used:
-        # it also names payload that must never be renamed, such as librustdesk.dll
-        # and drivers\RustDeskPrinterDriver.
-        #
-        #
-        # Building the arm64 template on the native arm64 runner makes the ARM
-        # package available: the build agents are x64 and cannot run
-        # preprocess.py against an ARM exe.
-        if: env.UPLOAD_ARTIFACT == 'true'
+        if: false
         run: |
           git checkout -- res/msi
           cp -r ./rustdesk ./rustdesk-msi-template
@@ -477,7 +461,7 @@ jobs:
           rm -r -fo ./rustdesk-msi-template
 
       - name: Upload unsigned msi template
-        if: env.UPLOAD_ARTIFACT == 'true'
+        if: false
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: rustdesk-unsigned-msi-template-${{ matrix.job.arch }}
@@ -764,7 +748,7 @@ jobs:
             APP_BUNDLE="$(find ./flutter/build/macos/Build/Products/Release -maxdepth 1 -name '*.app' | head -n 1)"
           fi
           APP_BASENAME="$(basename "$APP_BUNDLE")"
-          create-dmg --icon "$APP_BASENAME" 200 190 --hide-extension "$APP_BASENAME" --window-size 800 400 --app-drop-link 600 185 rrremote-${{ env.VERSION }}-${{ matrix.job.arch }}.dmg "$APP_BUNDLE"
+          create-dmg --volname "RRRemote" --icon "$APP_BASENAME" 200 190 --hide-extension "$APP_BASENAME" --window-size 800 400 --app-drop-link 600 185 rrremote-${{ env.VERSION }}-${{ matrix.job.arch }}.dmg "$APP_BUNDLE"
 
       - name: Upload unsigned macOS app
         if: env.UPLOAD_ARTIFACT == 'true'
@@ -834,7 +818,7 @@ jobs:
 
   build-rustdesk-linux:
     needs: [generate-bridge]
-    name: build rustdesk linux ${{ matrix.job.target }}
+    name: Build RRRemote Linux ${{ matrix.job.target }}
     runs-on: ${{ matrix.job.on }}
     strategy:
       fail-fast: false
@@ -949,10 +933,10 @@ jobs:
         if: matrix.job.arch == 'x86_64' || env.UPLOAD_ARTIFACT == 'true'
         run: |
           sudo apt install -y libva-dev && apt show libva-dev
-          if ! $VCPKG_ROOT/vcpkg \
-            install \
-            --triplet ${{ matrix.job.vcpkg-triplet }} \
-            --x-install-root="$VCPKG_ROOT/installed"; then
+          install_vcpkg() {
+            $VCPKG_ROOT/vcpkg install --triplet ${{ matrix.job.vcpkg-triplet }} --x-install-root="$VCPKG_ROOT/installed"
+          }
+          if ! (install_vcpkg || install_vcpkg); then
             find "${VCPKG_ROOT}/" -name "*.log" | while read -r _1; do
               echo "$_1:"
               echo "======"
@@ -1111,7 +1095,7 @@ jobs:
             export CARGO_INCREMENTAL=0
             export DEB_ARCH=${{ matrix.job.deb_arch }}
             python3 ./build.py --flutter --skip-cargo
-            for name in rustdesk*??.deb; do
+            for name in rrremote*??.deb; do
               mv "$name" "${name%%.deb}-${{ matrix.job.arch }}.deb"
             done
 
@@ -1125,7 +1109,7 @@ jobs:
             esac
             HBB=`pwd` rpmbuild ./res/rpm-flutter.spec -bb
             pushd ~/rpmbuild/RPMS/${{ matrix.job.arch }}
-            for name in rustdesk*??.rpm; do
+            for name in rrremote*??.rpm; do
                 mv "$name" /workspace/"${name%%.rpm}.rpm"
             done
 
@@ -1139,7 +1123,7 @@ jobs:
             esac
             HBB=`pwd` rpmbuild ./res/rpm-flutter-suse.spec -bb
             pushd ~/rpmbuild/RPMS/${{ matrix.job.arch }}
-            for name in rustdesk*??.rpm; do
+            for name in rrremote*??.rpm; do
                 mv "$name" /workspace/"${name%%.rpm}-suse.rpm"
             done
 
@@ -1150,15 +1134,15 @@ jobs:
           prerelease: false
           tag_name: ${{ env.TAG_NAME }}
           files: |
-            rustdesk-*.deb
-            rustdesk-*.rpm
+            rrremote-*.deb
+            rrremote-*.rpm
 
       - name: Upload deb
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: env.UPLOAD_ARTIFACT == 'true'
         with:
-          name: rustdesk-${{ env.VERSION }}-${{ matrix.job.arch }}.deb
-          path: rustdesk-${{ env.VERSION }}-${{ matrix.job.arch }}.deb
+          name: rrremote-${{ env.VERSION }}-${{ matrix.job.arch }}.deb
+          path: rrremote-${{ env.VERSION }}-${{ matrix.job.arch }}.deb
 
       # only x86_64 for arch since we can not find newest arm64 docker image to build
       # old arch image does not make sense for arch since it is "arch" which always update to date
@@ -1186,7 +1170,7 @@ jobs:
           prerelease: false
           tag_name: ${{ env.TAG_NAME }}
           files: |
-            res/rustdesk-${{ env.VERSION }}*.zst
+            res/rrremote-${{ env.VERSION }}*.zst
 
   # Same build as build-rustdesk-linux x86_64 -- same vcpkg/ffmpeg, same ubuntu18.04 container, same
   # rust and flutter -- only with the drm feature on, so it ships as the separate
@@ -1196,7 +1180,7 @@ jobs:
 
   build-rustdesk-android:
     needs: [generate-bridge]
-    name: build rustdesk android apk ${{ matrix.job.target }}
+    name: Build RRRemote Android APK ${{ matrix.job.target }}
     runs-on: ${{ matrix.job.os }}
     strategy:
       fail-fast: false
@@ -1497,7 +1481,7 @@ jobs:
 
   build-rustdesk-ios:
     if: true
-    name: build rustdesk ios ipa
+    name: Build RRRemote iOS IPA
     runs-on: ${{ matrix.job.os }}
     needs: [generate-bridge]
     strategy:

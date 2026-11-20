@@ -126,6 +126,17 @@ if [[ "${CURRENT_TAG}" != "${DESIRED_TAG}" ]]; then
   echo "[rrremote] Installing ${APP_NAME} to /Applications..."
   pkill -x RustDesk 2>/dev/null || true
   pkill -x RRRemote 2>/dev/null || true
+  # Migrate legacy com.carriez.RustDesk preferences into com.carriez.RRRemote once
+  LEGACY_PREF="${HOME}/Library/Preferences/com.carriez.RustDesk"
+  NEW_PREF="${HOME}/Library/Preferences/com.carriez.RRRemote"
+  if [[ -d "${LEGACY_PREF}" && ! -f "${NEW_PREF}/RRRemote2.toml" ]]; then
+    mkdir -p "${NEW_PREF}/peers"
+    [[ -f "${LEGACY_PREF}/RustDesk.toml" ]] && cp -n "${LEGACY_PREF}/RustDesk.toml" "${NEW_PREF}/RRRemote.toml" || true
+    [[ -f "${LEGACY_PREF}/RustDesk2.toml" ]] && cp -n "${LEGACY_PREF}/RustDesk2.toml" "${NEW_PREF}/RRRemote2.toml" || true
+    [[ -f "${LEGACY_PREF}/RustDesk_local.toml" ]] && cp -n "${LEGACY_PREF}/RustDesk_local.toml" "${NEW_PREF}/RRRemote_local.toml" || true
+    [[ -d "${LEGACY_PREF}/peers" ]] && cp -Rn "${LEGACY_PREF}/peers/." "${NEW_PREF}/peers/" 2>/dev/null || true
+    echo "[rrremote] Migrated legacy preferences to ${NEW_PREF}"
+  fi
   if [[ "${APP_NAME}" == "RRRemote.app" && -d "/Applications/RustDesk.app" ]]; then
     rm -rf "/Applications/RustDesk.app"
   fi

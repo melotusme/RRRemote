@@ -14,7 +14,33 @@ import argparse
 import os
 import platform
 import re
+import shutil
 from pathlib import Path
+
+
+def migrate_legacy_dir(legacy_dir: Path, new_dir: Path) -> None:
+    """Copy legacy RustDesk config & peers into RRRemote config directory once."""
+    if not legacy_dir.exists():
+        return
+    new_dir.mkdir(parents=True, exist_ok=True)
+    for src_name, dst_name in (
+        ("RustDesk.toml", "RRRemote.toml"),
+        ("RustDesk2.toml", "RRRemote2.toml"),
+        ("RustDesk_local.toml", "RRRemote_local.toml"),
+        ("RustDesk_default.toml", "RRRemote_default.toml"),
+    ):
+        src = legacy_dir / src_name
+        dst = new_dir / dst_name
+        if src.exists() and not dst.exists():
+            shutil.copy2(src, dst)
+            print(f"[rrremote] Migrated {src} -> {dst}")
+    src_peers = legacy_dir / "peers"
+    dst_peers = new_dir / "peers"
+    if src_peers.is_dir():
+        dst_peers.mkdir(parents=True, exist_ok=True)
+        for p in src_peers.iterdir():
+            if p.is_file() and not (dst_peers / p.name).exists():
+                shutil.copy2(p, dst_peers / p.name)
 
 
 def candidate_config_paths() -> list[Path]:
@@ -25,22 +51,37 @@ def candidate_config_paths() -> list[Path]:
     if system == "Windows":
         appdata = os.environ.get("APPDATA")
         if appdata:
-            paths.append(Path(appdata) / "RustDesk" / "config" / "RustDesk2.toml")
-        # Windows Service profiles (LocalSystem is the default service account, plus LocalService)
-        for svc_cfg in (
-            Path(r"C:\Windows\System32\config\systemprofile\AppData\Roaming\RustDesk\config\RustDesk2.toml"),
-            Path(r"C:\Windows\ServiceProfiles\LocalService\AppData\Roaming\RustDesk\config\RustDesk2.toml"),
+            new_dir = Path(appdata) / "RRRemote" / "config"
+            migrate_legacy_dir(Path(appdata) / "RustDesk" / "config", new_dir)
+            paths.append(new_dir / "RRRemote2.toml")
+        for legacy_dir, new_dir in (
+            (
+                Path(r"C:\Windows\System32\config\systemprofile\AppData\Roaming\RustDesk\config"),
+                Path(r"C:\Windows\System32\config\systemprofile\AppData\Roaming\RRRemote\config"),
+            ),
+            (
+                Path(r"C:\Windows\ServiceProfiles\LocalService\AppData\Roaming\RustDesk\config"),
+                Path(r"C:\Windows\ServiceProfiles\LocalService\AppData\Roaming\RRRemote\config"),
+            ),
         ):
-            if svc_cfg.parent.exists() or svc_cfg.parent.parent.exists():
-                paths.append(svc_cfg)
+            if new_dir.parent.exists() or legacy_dir.parent.exists():
+                try:
+                    migrate_legacy_dir(legacy_dir, new_dir)
+                except PermissionError:
+                    pass
+                paths.append(new_dir / "RRRemote2.toml")
     elif system == "Darwin":
-        paths.append(home / "Library" / "Preferences" / "com.carriez.RustDesk" / "RustDesk2.toml")
+        legacy_dir = home / "Library" / "Preferences" / "com.carriez.RustDesk"
+        new_dir = home / "Library" / "Preferences" / "com.carriez.RRRemote"
+        migrate_legacy_dir(legacy_dir, new_dir)
+        paths.append(new_dir / "RRRemote2.toml")
     else:
         xdg = Path(os.environ.get("XDG_CONFIG_HOME", home / ".config"))
-        paths.append(xdg / "rustdesk" / "RustDesk2.toml")
-        root_cfg = Path("/root/.config/rustdesk/RustDesk2.toml")
+        migrate_legacy_dir(xdg / "rustdesk", xdg / "rrremote")
+        paths.append(xdg / "rrremote" / "RRRemote2.toml")
         if os.geteuid() == 0:
-            paths.append(root_cfg)
+            migrate_legacy_dir(Path("/root/.config/rustdesk"), Path("/root/.config/rrremote"))
+            paths.append(Path("/root/.config/rrremote/RRRemote2.toml"))
 
     return paths
 

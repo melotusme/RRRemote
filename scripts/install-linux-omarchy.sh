@@ -169,8 +169,12 @@ EOF
   fi
 fi
 
-# Enable system service if present
-if systemctl list-unit-files | grep -q "^rustdesk\.service"; then
+# Enable system service if present (stop legacy rustdesk.service first)
+if systemctl list-unit-files | grep -q "^rrremote\.service"; then
+  sudo systemctl stop rustdesk.service 2>/dev/null || true
+  sudo systemctl disable rustdesk.service 2>/dev/null || true
+  sudo systemctl enable --now rrremote.service
+elif systemctl list-unit-files | grep -q "^rustdesk\.service"; then
   sudo systemctl enable --now rustdesk.service
 fi
 
@@ -185,8 +189,8 @@ if [[ -n "${SERVER}" && -n "${KEY}" ]]; then
   [[ -n "${RELAY}" ]] && ARGS+=(--relay "${RELAY}")
   [[ -n "${API_SERVER}" ]] && ARGS+=(--api-server "${API_SERVER}")
   python3 "${SCRIPT_DIR}/configure-client.py" "${ARGS[@]}"
-  sudo python3 "${SCRIPT_DIR}/configure-client.py" "${ARGS[@]}" --config-path /root/.config/rustdesk/RustDesk2.toml 2>/dev/null || true
-  sudo systemctl restart rustdesk.service 2>/dev/null || true
+  sudo python3 "${SCRIPT_DIR}/configure-client.py" "${ARGS[@]}" --config-path /root/.config/rrremote/RRRemote2.toml 2>/dev/null || true
+  sudo systemctl restart rrremote.service 2>/dev/null || sudo systemctl restart rustdesk.service 2>/dev/null || true
 fi
 
 if [[ "${REGISTER_AUTO_UPDATE}" == "1" ]]; then

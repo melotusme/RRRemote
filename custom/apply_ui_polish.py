@@ -620,6 +620,12 @@ def patch_desktop_home_page(root: Path, update_repo: str) -> None:
     # 4. Redirect desktop update card links to RRRemote GitHub Releases & auto-download on startup
     txt = replace_exact(
         txt,
+        "        bind.mainUriPrefixSync().contains('rustdesk')) {",
+        "        (bind.mainUriPrefixSync().contains('rustdesk') ||\n            bind.mainUriPrefixSync().contains('rrremote'))) {",
+        "Allow rrremote:// URI prefix for built-in update card",
+    )
+    txt = replace_exact(
+        txt,
         "final Uri url = Uri.parse('https://rustdesk.com/download');",
         f"final Uri url = Uri.parse('https://github.com/{update_repo}/releases/latest');",
         "Redirect desktop download URL to RRRemote repo",
@@ -1219,6 +1225,41 @@ def patch_mobile_ui(root: Path, update_repo: str) -> None:
         "Mobile BottomNavigationBar hairline divider (close)",
     )
     write_text(home_p, htxt)
+
+    # 3. Replace remaining rustdesk.com links & text in Desktop & Mobile Settings and common.dart
+    repo_url = f"https://github.com/{update_repo}"
+    for rel, pairs in (
+        (
+            "flutter/lib/desktop/pages/desktop_setting_page.dart",
+            [
+                ("launchUrlString('https://rustdesk.com/privacy.html')", f"launchUrlString('{repo_url}')"),
+                ("launchUrlString('https://rustdesk.com')", f"launchUrlString('{repo_url}')"),
+            ],
+        ),
+        (
+            "flutter/lib/mobile/pages/settings_page.dart",
+            [
+                ("'https://rustdesk.com/'", f"'{repo_url}'"),
+                ("'https://rustdesk.com/privacy.html'", f"'{repo_url}'"),
+                ("Text('rustdesk.com'", "Text('RRRemote'"),
+            ],
+        ),
+        (
+            "flutter/lib/common.dart",
+            [
+                ("Uri.parse('https://rustdesk.com')", f"Uri.parse('{repo_url}')"),
+            ],
+        ),
+    ):
+        fp = root / rel
+        if fp.exists():
+            ftxt = read_text(fp)
+            orig = ftxt
+            for old_s, new_s in pairs:
+                ftxt = ftxt.replace(old_s, new_s)
+            if ftxt != orig:
+                write_text(fp, ftxt)
+                print(f"[rrremote-ui] Replaced rustdesk.com references in {rel}")
 
 
 def main() -> int:

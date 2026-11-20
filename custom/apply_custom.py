@@ -30,13 +30,27 @@ def write_text(path: Path, content: str) -> None:
     path.write_text(content, encoding="utf-8", newline="\n")
 
 
-def patch_hbb_common_config(root: Path, rendezvous: str, pub_key: str, api_server: str) -> None:
+def patch_hbb_common_config(root: Path, display_name: str, rendezvous: str, pub_key: str, api_server: str) -> None:
     config_rs = root / "libs" / "hbb_common" / "src" / "config.rs"
     if not config_rs.exists():
         raise FileNotFoundError(f"Expected {config_rs} (ensure git submodules are checked out)")
 
     content = read_text(config_rs)
     changed = False
+
+    # 0. Set native APP_NAME so config dirs, services, logs, tray, IPC, MSI, macOS & Linux
+    #    packaging and i18n translations all natively identify as RRRemote.
+    if display_name and display_name != "RustDesk":
+        old_app_name = 'pub static ref APP_NAME: RwLock<String> = RwLock::new("RustDesk".to_owned());'
+        new_app_name = f'pub static ref APP_NAME: RwLock<String> = RwLock::new("{display_name}".to_owned());'
+        if old_app_name in content:
+            content = content.replace(old_app_name, new_app_name, 1)
+            changed = True
+            print(f"[rrremote] Set hbb_common::config::APP_NAME = {display_name!r}.")
+        elif new_app_name in content:
+            print(f"[rrremote] hbb_common::config::APP_NAME already set to {display_name!r}.")
+        else:
+            raise RuntimeError("Failed to locate APP_NAME in libs/hbb_common/src/config.rs")
 
     # 1. Permanently disable account/login UI across all platforms (personal tool)
     old_disable_acc = (
@@ -463,6 +477,8 @@ def patch_display_branding(root: Path, display_name: str) -> None:
     if not display_name or display_name == "RustDesk":
         return
 
+    lower_name = display_name.lower()
+
     # 1. Flutter Dart window title
     flutter_main = root / "flutter" / "lib" / "main.dart"
     if flutter_main.exists():
@@ -473,36 +489,29 @@ def patch_display_branding(root: Path, display_name: str) -> None:
             write_text(flutter_main, updated)
             print(f"[rrremote] Updated Flutter app title to {display_name}.")
 
-    # 2. Rust FFI UI app name (dialogs, menus, about, tips) & system tray tooltip
-    #    Keep hbb_common::config::APP_NAME intact so existing config paths/IDs/favorites migrate seamlessly.
-    ffi_rs = root / "src" / "flutter_ffi.rs"
-    if ffi_rs.exists():
-        txt = read_text(ffi_rs)
-        updated = txt.replace(
-            "pub fn main_get_app_name() -> String {\n    get_app_name()\n}",
-            f'pub fn main_get_app_name() -> String {{\n    "{display_name}".to_owned()\n}}',
-            1,
-        ).replace(
-            "pub fn main_get_app_name_sync() -> SyncReturn<String> {\n    SyncReturn(get_app_name())\n}",
-            f'pub fn main_get_app_name_sync() -> SyncReturn<String> {{\n    SyncReturn("{display_name}".to_owned())\n}}',
-            1,
-        )
-        if updated != txt:
-            write_text(ffi_rs, updated)
-            print(f"[rrremote] Updated Flutter FFI UI app name to {display_name}.")
+    # 2. Ensure ALL i18n strings replace "RustDesk" -> display_name (including powered_by_me)
+    lang_rs = root / "src" / "lang.rs"
+    if lang_rs.exists():
+        txt = read_text(lang_rs)
+        old_lang_guard = """            if s.contains("RustDesk")
+                && !name.starts_with("upgrade_rustdesk_server_pro")
+                && name != "powered_by_me"
+            {"""
+        new_lang_guard = """            if s.contains("RustDesk") {"""
+        if old_lang_guard in txt:
+            txt = txt.replace(old_lang_guard, new_lang_guard, 1)
+            write_text(lang_rs, txt)
+            print(f"[rrremote] Enabled 100% i18n RustDesk -> {display_name} substitution in src/lang.rs.")
 
-    tray_rs = root / "src" / "tray.rs"
-    if tray_rs.exists():
-        txt = read_text(tray_rs)
-        updated = txt.replace(
-            '"{} {}",\n                crate::get_app_name(),',
-            f'"{{}} {{}}",\n                "{display_name}",',
-        )
+    # 3. Windows binary name (RRRemote.exe), runner title & file version metadata
+    win_cmake = root / "flutter" / "windows" / "CMakeLists.txt"
+    if win_cmake.exists():
+        txt = read_text(win_cmake)
+        updated = txt.replace('set(BINARY_NAME "rustdesk")', f'set(BINARY_NAME "{display_name}")')
         if updated != txt:
-            write_text(tray_rs, updated)
-            print(f"[rrremote] Updated system tray tooltip brand to {display_name}.")
+            write_text(win_cmake, updated)
+            print(f"[rrremote] Set Windows BINARY_NAME to {display_name}.exe.")
 
-    # 3. Windows runner title & executable file version metadata (Task Manager / File Properties)
     win_main = root / "flutter" / "windows" / "runner" / "main.cpp"
     if win_main.exists():
         txt = read_text(win_main)
@@ -517,6 +526,8 @@ def patch_display_branding(root: Path, display_name: str) -> None:
         updated = (
             txt.replace('VALUE "CompanyName", "Purslane Tech Pte. Ltd."', f'VALUE "CompanyName", "{display_name}"')
             .replace('VALUE "FileDescription", "RustDesk Remote Desktop"', f'VALUE "FileDescription", "{display_name} Remote Desktop"')
+            .replace('VALUE "InternalName", "rustdesk"', f'VALUE "InternalName", "{display_name}"')
+            .replace('VALUE "OriginalFilename", "rustdesk.exe"', f'VALUE "OriginalFilename", "{display_name}.exe"')
             .replace('VALUE "ProductName", "RustDesk"', f'VALUE "ProductName", "{display_name}"')
             .replace('Copyright © 2026 Purslane Tech Pte. Ltd.', f'Copyright © 2026 {display_name}.')
         )
@@ -524,7 +535,7 @@ def patch_display_branding(root: Path, display_name: str) -> None:
             write_text(win_rc, updated)
             print(f"[rrremote] Updated Windows Runner.rc product metadata to {display_name}.")
 
-    # 4. macOS app bundle name (RRRemote.app), DisplayName, Menu Bar & self-updater bundle path
+    # 4. macOS app bundle name (RRRemote.app), DisplayName, Menu Bar & URL scheme
     mac_xcconfig = root / "flutter" / "macos" / "Runner" / "Configs" / "AppInfo.xcconfig"
     if mac_xcconfig.exists():
         txt = read_text(mac_xcconfig)
@@ -547,9 +558,13 @@ def patch_display_branding(root: Path, display_name: str) -> None:
                 f"\t<key>CFBundleDisplayName</key>\n\t<string>{display_name}</string>\n\t<key>CFBundleExecutable</key>",
                 1,
             )
+        updated = updated.replace(
+            "<string>rustdesk</string>",
+            f"<string>{lower_name}</string>",
+        )
         if updated != txt:
             write_text(mac_plist, updated)
-            print(f"[rrremote] Added macOS CFBundleDisplayName={display_name} to Info.plist.")
+            print(f"[rrremote] Updated macOS Info.plist display name & URL scheme to {display_name}.")
 
     mac_menu = root / "flutter" / "macos" / "Runner" / "Base.lproj" / "MainMenu.xib"
     if mac_menu.exists():
@@ -571,69 +586,220 @@ def patch_display_branding(root: Path, display_name: str) -> None:
             write_text(mac_pbxproj, updated)
             print(f"[rrremote] Updated macOS project.pbxproj product reference to {display_name}.app.")
 
-    build_py = root / "build.py"
-    if build_py.exists():
-        txt = read_text(build_py)
-        updated = txt.replace(
-            "Release/RustDesk.app/Contents/MacOS/",
-            f"Release/{display_name}.app/Contents/MacOS/",
-        )
+    # 5. Linux binary name (rrremote), desktop entries, systemd service, GTK title & packaging
+    linux_cmake = root / "flutter" / "linux" / "CMakeLists.txt"
+    if linux_cmake.exists():
+        txt = read_text(linux_cmake)
+        updated = txt.replace('set(BINARY_NAME "rustdesk")', f'set(BINARY_NAME "{lower_name}")')
         if updated != txt:
-            write_text(build_py, updated)
-            print(f"[rrremote] Updated build.py macOS app bundle path to {display_name}.app.")
-
-    mac_rs = root / "src" / "platform" / "macos.rs"
-    if mac_rs.exists():
-        txt = read_text(mac_rs)
-        updated = txt
-        updated = updated.replace(
-            '.starts_with(&format!("/Applications/{}.app", crate::get_app_name()));',
-            f'.starts_with("/Applications/{display_name}.app");',
-            1,
-        )
-        updated = updated.replace(
-            'fn update_me_from_source(update_source: UpdateSource) -> ResultType<()> {\n    let app_name = crate::get_app_name();',
-            f'fn update_me_from_source(update_source: UpdateSource) -> ResultType<()> {{\n    let app_name = "{display_name}".to_owned();',
-            1,
-        )
-        updated = updated.replace(
-            '        guard.mount_point(),\n            crate::get_app_name()\n        ))',
-            f'        guard.mount_point(),\n            "{display_name}"\n        ))',
-            1,
-        )
-        updated = updated.replace(
-            '        .arg(&format!("/Applications/{}.app", crate::get_app_name()))',
-            f'        .arg("/Applications/{display_name}.app")',
-        )
-        if updated != txt:
-            write_text(mac_rs, updated)
-            print(f"[rrremote] Updated macOS bundle/updater paths in src/platform/macos.rs to {display_name}.app.")
-
-    # 5. Linux desktop entries & GTK window title
-    for desktop_rel in ("res/rustdesk.desktop", "res/rustdesk-link.desktop"):
-        dp = root / desktop_rel
-        if dp.exists():
-            txt = read_text(dp)
-            updated = txt.replace("Name=RustDesk", f"Name={display_name}").replace(
-                "Comment=Remote Desktop", f"Comment={display_name} Remote Desktop"
-            )
-            if updated != txt:
-                write_text(dp, updated)
-                print(f"[rrremote] Updated {desktop_rel} Name to {display_name}.")
+            write_text(linux_cmake, updated)
+            print(f"[rrremote] Set Linux BINARY_NAME to {lower_name}.")
 
     linux_app = root / "flutter" / "linux" / "my_application.cc"
     if linux_app.exists():
         txt = read_text(linux_app)
-        updated = txt.replace(
-            'gtk_header_bar_set_title(header_bar, "rustdesk");',
-            f'gtk_header_bar_set_title(header_bar, "{display_name}");',
-        ).replace(
-            'gtk_window_set_title(window, "rustdesk");',
-            f'gtk_window_set_title(window, "{display_name}");',
+        updated = (
+            txt.replace(
+                'gtk_header_bar_set_title(header_bar, "rustdesk");',
+                f'gtk_header_bar_set_title(header_bar, "{display_name}");',
+            )
+            .replace(
+                'gtk_window_set_title(window, "rustdesk");',
+                f'gtk_window_set_title(window, "{display_name}");',
+            )
+            .replace(
+                'gtk_icon_theme_load_icon(theme, "rustdesk",',
+                f'gtk_icon_theme_load_icon(theme, "{lower_name}",',
+            )
         )
         if updated != txt:
             write_text(linux_app, updated)
-            print(f"[rrremote] Updated Linux GTK window title to {display_name}.")
+            print(f"[rrremote] Updated Linux GTK window title & icon name to {display_name}/{lower_name}.")
+
+    desktop_file = root / "res" / "rustdesk.desktop"
+    if desktop_file.exists():
+        txt = read_text(desktop_file)
+        updated = (
+            txt.replace("Name=RustDesk", f"Name={display_name}")
+            .replace("Comment=Remote Desktop", f"Comment={display_name} Remote Desktop")
+            .replace("Exec=rustdesk %u", f"Exec={lower_name} %u")
+            .replace("Icon=rustdesk", f"Icon={lower_name}")
+            .replace("StartupWMClass=rustdesk", f"StartupWMClass={lower_name}")
+        )
+        write_text(desktop_file, updated)
+        print(f"[rrremote] Updated res/rustdesk.desktop for {display_name}.")
+
+    link_desktop = root / "res" / "rustdesk-link.desktop"
+    if link_desktop.exists():
+        txt = read_text(link_desktop)
+        updated = (
+            txt.replace("Name=RustDesk", f"Name={display_name}")
+            .replace("MimeType=x-scheme-handler/rustdesk;", f"MimeType=x-scheme-handler/{lower_name};")
+            .replace("TryExec=rustdesk", f"TryExec={lower_name}")
+            .replace("Exec=rustdesk %u", f"Exec={lower_name} %u")
+            .replace("Icon=rustdesk", f"Icon={lower_name}")
+            .replace("StartupWMClass=rustdesk", f"StartupWMClass={lower_name}")
+        )
+        write_text(link_desktop, updated)
+        print(f"[rrremote] Updated res/rustdesk-link.desktop for {display_name}.")
+
+    svc_file = root / "res" / "rustdesk.service"
+    if svc_file.exists():
+        txt = read_text(svc_file)
+        updated = (
+            txt.replace("Description=RustDesk", f"Description={display_name}")
+            .replace("ExecStart=/usr/bin/rustdesk --service", f"ExecStart=/usr/bin/{lower_name} --service")
+            .replace('ExecStop=pkill -f "rustdesk --"', f'ExecStop=pkill -f "{lower_name} --"')
+            .replace("PIDFile=/run/rustdesk.pid", f"PIDFile=/run/{lower_name}.pid")
+        )
+        write_text(svc_file, updated)
+        print(f"[rrremote] Updated res/rustdesk.service for {display_name}.")
+
+    pkgbuild = root / "res" / "PKGBUILD"
+    if pkgbuild.exists():
+        txt = read_text(pkgbuild)
+        updated = (
+            txt.replace("pkgname=rustdesk", f"pkgname={lower_name}")
+            .replace("provides=()", "provides=('rustdesk')")
+            .replace("conflicts=()", "conflicts=('rustdesk')")
+            .replace("replaces=()", "replaces=('rustdesk')")
+            .replace("/usr/share/rustdesk", f"/usr/share/{lower_name}")
+            .replace("usr/bin/rustdesk", f"usr/bin/{lower_name}")
+            .replace(f"/usr/share/{lower_name}/rustdesk", f"/usr/share/{lower_name}/{lower_name}")
+            .replace(
+                f'install -Dm 644 $HBB/res/rustdesk.service -t "${{pkgdir}}/usr/share/{lower_name}/files"',
+                f'install -Dm 644 $HBB/res/rustdesk.service "${{pkgdir}}/usr/share/{lower_name}/files/{lower_name}.service"',
+            )
+            .replace(
+                f'install -Dm 644 $HBB/res/rustdesk.desktop -t "${{pkgdir}}/usr/share/{lower_name}/files"',
+                f'install -Dm 644 $HBB/res/rustdesk.desktop "${{pkgdir}}/usr/share/{lower_name}/files/{lower_name}.desktop"',
+            )
+            .replace(
+                f'install -Dm 644 $HBB/res/rustdesk-link.desktop -t "${{pkgdir}}/usr/share/{lower_name}/files"',
+                f'install -Dm 644 $HBB/res/rustdesk-link.desktop "${{pkgdir}}/usr/share/{lower_name}/files/{lower_name}-link.desktop"',
+            )
+            .replace("apps/rustdesk.png", f"apps/{lower_name}.png")
+            .replace("apps/rustdesk.svg", f"apps/{lower_name}.svg")
+        )
+        write_text(pkgbuild, updated)
+        print(f"[rrremote] Updated res/PKGBUILD for {lower_name}.")
+
+    pacman_install = root / "res" / "pacman_install"
+    if pacman_install.exists():
+        new_pacman = f"""post_install() {{
+\tsystemctl stop rustdesk 2>/dev/null || true
+\tsystemctl disable rustdesk 2>/dev/null || true
+\trm -f /etc/systemd/system/rustdesk.service /usr/share/applications/rustdesk.desktop /usr/share/applications/rustdesk-link.desktop 2>/dev/null || true
+\tcp /usr/share/{lower_name}/files/{lower_name}.service /etc/systemd/system/{lower_name}.service
+\tcp /usr/share/{lower_name}/files/{lower_name}.desktop /usr/share/applications/
+\tcp /usr/share/{lower_name}/files/{lower_name}-link.desktop /usr/share/applications/
+\tsystemctl daemon-reload
+\tsystemctl enable {lower_name}
+\tsystemctl start {lower_name}
+\tupdate-desktop-database
+}}
+
+pre_upgrade() {{
+\tsystemctl stop {lower_name} || true
+\tsystemctl stop rustdesk || true
+}}
+
+post_upgrade() {{
+\tpost_install
+}}
+
+pre_remove() {{
+\tsystemctl stop {lower_name} || true
+\tsystemctl disable {lower_name} || true
+\trm -f /etc/systemd/system/{lower_name}.service || true
+}}
+
+post_remove() {{
+\trm -f /usr/share/applications/{lower_name}.desktop || true
+\trm -f /usr/share/applications/{lower_name}-link.desktop || true
+\tupdate-desktop-database
+}}
+"""
+        write_text(pacman_install, new_pacman)
+        print(f"[rrremote] Updated res/pacman_install for {lower_name}.")
+
+    for deb_script in ("res/DEBIAN/postinst", "res/DEBIAN/prerm", "res/DEBIAN/postrm"):
+        sp = root / deb_script
+        if sp.exists():
+            txt = read_text(sp)
+            updated = txt.replace("rustdesk", lower_name)
+            write_text(sp, updated)
+            print(f"[rrremote] Updated {deb_script} for {lower_name}.")
+
+    for spec_rel in ("res/rpm-flutter.spec", "res/rpm-flutter-suse.spec"):
+        sp = root / spec_rel
+        if sp.exists():
+            txt = read_text(sp)
+            updated = (
+                txt.replace("Name:       rustdesk", f"Name:       {lower_name}")
+                .replace("URL:        https://rustdesk.com", "URL:        https://github.com/melotusme/RRRemote")
+                .replace("Vendor:     rustdesk <info@rustdesk.com>", f"Vendor:     {display_name}")
+                .replace("/usr/share/rustdesk", f"/usr/share/{lower_name}")
+                .replace("/usr/bin/rustdesk", f"/usr/bin/{lower_name}")
+                .replace("/usr/lib/rustdesk", f"/usr/lib/{lower_name}")
+                .replace("/usr/local/rustdesk", f"/usr/local/{lower_name}")
+                .replace(
+                    f'install -Dm 644 $HBB/res/rustdesk.service -t "%{{buildroot}}/usr/share/{lower_name}/files"',
+                    f'install -Dm 644 $HBB/res/rustdesk.service "%{{buildroot}}/usr/share/{lower_name}/files/{lower_name}.service"',
+                )
+                .replace(
+                    f'install -Dm 644 $HBB/res/rustdesk.desktop -t "%{{buildroot}}/usr/share/{lower_name}/files"',
+                    f'install -Dm 644 $HBB/res/rustdesk.desktop "%{{buildroot}}/usr/share/{lower_name}/files/{lower_name}.desktop"',
+                )
+                .replace(
+                    f'install -Dm 644 $HBB/res/rustdesk-link.desktop -t "%{{buildroot}}/usr/share/{lower_name}/files"',
+                    f'install -Dm 644 $HBB/res/rustdesk-link.desktop "%{{buildroot}}/usr/share/{lower_name}/files/{lower_name}-link.desktop"',
+                )
+                .replace("apps/rustdesk.png", f"apps/{lower_name}.png")
+                .replace("apps/rustdesk.svg", f"apps/{lower_name}.svg")
+                .replace("files/rustdesk.service", f"files/{lower_name}.service")
+                .replace("files/rustdesk.desktop", f"files/{lower_name}.desktop")
+                .replace("files/rustdesk-link.desktop", f"files/{lower_name}-link.desktop")
+                .replace("/etc/systemd/system/rustdesk.service", f"/etc/systemd/system/{lower_name}.service")
+                .replace("/usr/share/applications/rustdesk.desktop", f"/usr/share/applications/{lower_name}.desktop")
+                .replace("/usr/share/applications/rustdesk-link.desktop", f"/usr/share/applications/{lower_name}-link.desktop")
+                .replace(f"/usr/share/{lower_name}/rustdesk", f"/usr/share/{lower_name}/{lower_name}")
+                .replace("systemctl stop rustdesk", f"systemctl stop {lower_name}")
+                .replace("systemctl enable rustdesk", f"systemctl enable {lower_name}")
+                .replace("systemctl start rustdesk", f"systemctl start {lower_name}")
+                .replace("systemctl disable rustdesk", f"systemctl disable {lower_name}")
+            )
+            write_text(sp, updated)
+            print(f"[rrremote] Updated {spec_rel} for {lower_name}.")
+
+    build_py = root / "build.py"
+    if build_py.exists():
+        txt = read_text(build_py)
+        updated = (
+            txt.replace(
+                "Release/RustDesk.app/Contents/MacOS/",
+                f"Release/{display_name}.app/Contents/MacOS/",
+            )
+            .replace("Package: rustdesk", f"Package: {lower_name}")
+            .replace("Maintainer: rustdesk <info@rustdesk.com>", f"Maintainer: {display_name}")
+            .replace("Homepage: https://rustdesk.com", "Homepage: https://github.com/melotusme/RRRemote")
+            .replace("tmpdeb/usr/share/rustdesk/rustdesk", f"tmpdeb/usr/share/{lower_name}/{lower_name}")
+            .replace("tmpdeb/usr/share/rustdesk", f"tmpdeb/usr/share/{lower_name}")
+            .replace("tmpdeb/usr/bin/rustdesk", f"tmpdeb/usr/bin/{lower_name}")
+            .replace(
+                f"cp ../res/rustdesk.service tmpdeb/usr/share/{lower_name}/files/systemd/",
+                f"cp ../res/rustdesk.service tmpdeb/usr/share/{lower_name}/files/systemd/{lower_name}.service",
+            )
+            .replace("apps/rustdesk.png", f"apps/{lower_name}.png")
+            .replace("apps/rustdesk.svg", f"apps/{lower_name}.svg")
+            .replace("applications/rustdesk.desktop", f"applications/{lower_name}.desktop")
+            .replace("applications/rustdesk-link.desktop", f"applications/{lower_name}-link.desktop")
+            .replace("dpkg-deb -b tmpdeb rustdesk.deb;", f"dpkg-deb -b tmpdeb {lower_name}.deb;")
+            .replace("os.rename('rustdesk.deb', '../rustdesk-%s.deb' % version)", f"os.rename('{lower_name}.deb', '../{lower_name}-%s.deb' % version)")
+        )
+        if updated != txt:
+            write_text(build_py, updated)
+            print(f"[rrremote] Updated build.py macOS & Linux packaging paths for {display_name}/{lower_name}.")
 
     # 6. Android label & modern Gradle mavenCentral() repository
     android_manifest = root / "flutter" / "android" / "app" / "src" / "main" / "AndroidManifest.xml"
@@ -658,12 +824,19 @@ def patch_display_branding(root: Path, display_name: str) -> None:
     ios_plist = root / "flutter" / "ios" / "Runner" / "Info.plist"
     if ios_plist.exists():
         txt = read_text(ios_plist)
-        updated = txt.replace(
-            "<key>CFBundleDisplayName</key>\n\t<string>RustDesk</string>",
-            f"<key>CFBundleDisplayName</key>\n\t<string>{display_name}</string>",
-        ).replace(
-            "<key>CFBundleName</key>\n\t<string>RustDesk</string>",
-            f"<key>CFBundleName</key>\n\t<string>{display_name}</string>",
+        updated = (
+            txt.replace(
+                "<key>CFBundleDisplayName</key>\n\t<string>RustDesk</string>",
+                f"<key>CFBundleDisplayName</key>\n\t<string>{display_name}</string>",
+            )
+            .replace(
+                "<key>CFBundleName</key>\n\t<string>RustDesk</string>",
+                f"<key>CFBundleName</key>\n\t<string>{display_name}</string>",
+            )
+            .replace(
+                "<string>rustdesk</string>",
+                f"<string>{lower_name}</string>",
+            )
         )
         if updated != txt:
             write_text(ios_plist, updated)
@@ -674,7 +847,7 @@ def main() -> int:
     root = Path(sys.argv[1]).resolve() if len(sys.argv) > 1 else Path.cwd()
     display_name = os.environ.get("APP_DISPLAY_NAME", "RRRemote").strip()
     update_repo = os.environ.get("UPDATE_REPO", "melotusme/RRRemote").strip()
-    build_tag = os.environ.get("RR_BUILD_TAG", "v1.5.3-rr4").strip()
+    build_tag = os.environ.get("RR_BUILD_TAG", "v1.5.3-rr5").strip()
     rendezvous = os.environ.get("RR_RENDEZVOUS_SERVER", "").strip()
     pub_key = os.environ.get("RR_PUB_KEY", "").strip()
     api_server = os.environ.get("RR_API_SERVER", "").strip()
@@ -686,7 +859,7 @@ def main() -> int:
         "enabled" if (rendezvous or pub_key or api_server) else "disabled (configure in-app)",
     )
 
-    patch_hbb_common_config(root, rendezvous, pub_key, api_server)
+    patch_hbb_common_config(root, display_name, rendezvous, pub_key, api_server)
     patch_update_checker(root, update_repo, build_tag)
     patch_updater_artifact_resolver(root, update_repo)
     patch_default_api_server_fallback(root, api_server)

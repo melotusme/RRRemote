@@ -126,6 +126,15 @@ if ($currentTag -ne $tag) {
     $startParams = @{ PassThru = $true }
     if (-not $isAdmin) { $startParams["Verb"] = "RunAs" }
 
+    # Stop legacy RustDesk process/service before installing native RRRemote
+    Get-Process -Name "rustdesk","RRRemote" -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+    if ($isAdmin) {
+        if (Get-Service -Name "RustDesk" -ErrorAction SilentlyContinue) {
+            Stop-Service -Name "RustDesk" -Force -ErrorAction SilentlyContinue
+            sc.exe config RustDesk start= disabled | Out-Null
+        }
+    }
+
     if ($asset.name -like "*.msi") {
         $proc = Start-Process msiexec.exe -ArgumentList @("/i", "`"$dlPath`"", "/qn", "/norestart") @startParams
         $proc.WaitForExit()
@@ -135,14 +144,18 @@ if ($currentTag -ne $tag) {
         $null = $proc.WaitForExit(90000)
     }
 
-    if (-not (Test-Path "C:\Program Files\RustDesk\rustdesk.exe")) {
-        throw "Installation verification failed: C:\Program Files\RustDesk\rustdesk.exe not found"
+    $targetExe = if (Test-Path "C:\Program Files\RRRemote\RRRemote.exe") {
+        "C:\Program Files\RRRemote\RRRemote.exe"
+    } elseif (Test-Path "C:\Program Files\RustDesk\rustdesk.exe") {
+        "C:\Program Files\RustDesk\rustdesk.exe"
+    } else {
+        throw "Installation verification failed: C:\Program Files\RRRemote\RRRemote.exe not found"
     }
 
     # Ensure branded RRRemote Desktop & Start Menu shortcuts (and clean legacy RustDesk shortcut)
     try {
         $wshell = New-Object -ComObject WScript.Shell
-        $targetExe = "C:\Program Files\RustDesk\rustdesk.exe"
+        $targetDir = Split-Path -Parent $targetExe
         $desktopDir = [Environment]::GetFolderPath("Desktop")
         $startMenuDir = Join-Path $env:APPDATA "Microsoft\Windows\Start Menu\Programs"
         foreach ($scPath in @(
@@ -151,7 +164,7 @@ if ($currentTag -ne $tag) {
         )) {
             $sc = $wshell.CreateShortcut($scPath)
             $sc.TargetPath = $targetExe
-            $sc.WorkingDirectory = "C:\Program Files\RustDesk"
+            $sc.WorkingDirectory = $targetDir
             $sc.IconLocation = "$targetExe,0"
             $sc.Description = "RRRemote Remote Desktop"
             $sc.Save()
