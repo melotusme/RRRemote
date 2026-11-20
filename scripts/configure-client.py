@@ -112,16 +112,29 @@ def update_file(path: Path, server: str, relay: str, key: str, api_server: str, 
         content = upsert_toml_option(content, "key", key)
     if api_server:
         content = upsert_toml_option(content, "api-server", api_server)
+    else:
+        content = upsert_toml_option(content, "api-server", "")
     if direct_ip:
         content = upsert_toml_option(content, "direct-server", "Y")
     content = upsert_toml_option(content, "stop-service", "")
     content = upsert_toml_option(content, "av1-test", "N")
-    # Optimal controller/host ergonomics out of the box
-    content = upsert_toml_option(content, "view-style", "adaptive")
-    content = upsert_toml_option(content, "show-quality-monitor", "Y")
-    content = upsert_toml_option(content, "enable-audio", "Y")
-    content = upsert_toml_option(content, "enable-clipboard", "Y")
-    content = upsert_toml_option(content, "enable-file-transfer", "Y")
+    # Personal full-access mode: enable all capabilities & optimal ergonomics by default
+    for k, v in (
+        ("view-style", "adaptive"),
+        ("show-quality-monitor", "Y"),
+        ("approve-mode", "password"),
+        ("verification-method", "use-both-passwords"),
+        ("enable-keyboard", "Y"),
+        ("enable-clipboard", "Y"),
+        ("enable-audio", "Y"),
+        ("enable-file-transfer", "Y"),
+        ("enable-tunnel", "Y"),
+        ("enable-remote-restart", "Y"),
+        ("enable-record-session", "Y"),
+        ("enable-terminal", "Y"),
+        ("allow-remote-config-modification", "Y"),
+    ):
+        content = upsert_toml_option(content, k, v)
 
     path.write_text(content, encoding="utf-8", newline="\n")
     print(f"[rrremote] Updated config: {path}")
