@@ -156,7 +156,11 @@ EOF
     echo "[rrremote] Enabled screencast restore token in ${XDPH_CONF}"
   fi
 
-  # Ensure /dev/uinput is accessible for remote mouse/keyboard injection
+  # Ensure /dev/uinput is loaded and accessible for remote mouse/keyboard injection
+  if [[ ! -f /etc/modules-load.d/uinput.conf ]]; then
+    echo 'uinput' | sudo tee /etc/modules-load.d/uinput.conf >/dev/null
+  fi
+  sudo modprobe uinput 2>/dev/null || true
   if [[ ! -f /etc/udev/rules.d/99-rrremote-uinput.rules ]]; then
     echo 'KERNEL=="uinput", MODE="0660", GROUP="input", OPTIONS+="static_node=uinput"' | \
       sudo tee /etc/udev/rules.d/99-rrremote-uinput.rules >/dev/null

@@ -122,11 +122,14 @@ jobs:
         env:
           APP_DISPLAY_NAME: RRRemote
           UPDATE_REPO: ${{ github.repository }}
+          RR_BUILD_TAG: ${{ env.TAG_NAME }}
           RR_RENDEZVOUS_SERVER: ${{ secrets.RR_RENDEZVOUS_SERVER }}
           RR_PUB_KEY: ${{ secrets.RR_PUB_KEY }}
           RR_API_SERVER: ${{ secrets.RR_API_SERVER }}
         shell: bash
-        run: python3 .rrremote/custom/apply_custom.py .
+        run: |
+          python3 -m pip install --quiet pillow 2>/dev/null || true
+          python3 .rrremote/custom/apply_custom.py .
 
       - name: Restore bridge files
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
@@ -563,11 +566,14 @@ jobs:
         env:
           APP_DISPLAY_NAME: RRRemote
           UPDATE_REPO: ${{ github.repository }}
+          RR_BUILD_TAG: ${{ env.TAG_NAME }}
           RR_RENDEZVOUS_SERVER: ${{ secrets.RR_RENDEZVOUS_SERVER }}
           RR_PUB_KEY: ${{ secrets.RR_PUB_KEY }}
           RR_API_SERVER: ${{ secrets.RR_API_SERVER }}
         shell: bash
-        run: python3 .rrremote/custom/apply_custom.py .
+        run: |
+          python3 -m pip install --quiet pillow 2>/dev/null || true
+          python3 .rrremote/custom/apply_custom.py .
 
       - name: Import the codesign cert
         if: env.MACOS_P12_BASE64 != null
@@ -873,11 +879,14 @@ jobs:
         env:
           APP_DISPLAY_NAME: RRRemote
           UPDATE_REPO: ${{ github.repository }}
+          RR_BUILD_TAG: ${{ env.TAG_NAME }}
           RR_RENDEZVOUS_SERVER: ${{ secrets.RR_RENDEZVOUS_SERVER }}
           RR_PUB_KEY: ${{ secrets.RR_PUB_KEY }}
           RR_API_SERVER: ${{ secrets.RR_API_SERVER }}
         shell: bash
-        run: python3 .rrremote/custom/apply_custom.py .
+        run: |
+          python3 -m pip install --quiet pillow 2>/dev/null || true
+          python3 .rrremote/custom/apply_custom.py .
 
       - name: Set Swap Space
         uses: pierotofy/set-swap-space@49819abfb41bd9b44fb781159c033dba90353a7c # v1.0
@@ -1264,11 +1273,14 @@ jobs:
         env:
           APP_DISPLAY_NAME: RRRemote
           UPDATE_REPO: ${{ github.repository }}
+          RR_BUILD_TAG: ${{ env.TAG_NAME }}
           RR_RENDEZVOUS_SERVER: ${{ secrets.RR_RENDEZVOUS_SERVER }}
           RR_PUB_KEY: ${{ secrets.RR_PUB_KEY }}
           RR_API_SERVER: ${{ secrets.RR_API_SERVER }}
         shell: bash
-        run: python3 .rrremote/custom/apply_custom.py .
+        run: |
+          python3 -m pip install --quiet pillow 2>/dev/null || true
+          python3 .rrremote/custom/apply_custom.py .
 
       - name: Install flutter
         uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2
@@ -1519,11 +1531,14 @@ jobs:
         env:
           APP_DISPLAY_NAME: RRRemote
           UPDATE_REPO: ${{ github.repository }}
+          RR_BUILD_TAG: ${{ env.TAG_NAME }}
           RR_RENDEZVOUS_SERVER: ${{ secrets.RR_RENDEZVOUS_SERVER }}
           RR_PUB_KEY: ${{ secrets.RR_PUB_KEY }}
           RR_API_SERVER: ${{ secrets.RR_API_SERVER }}
         shell: bash
-        run: python3 .rrremote/custom/apply_custom.py .
+        run: |
+          python3 -m pip install --quiet pillow 2>/dev/null || true
+          python3 .rrremote/custom/apply_custom.py .
 
       - name: Install flutter
         uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2
@@ -1613,3 +1628,77 @@ jobs:
           tag_name: ${{ env.TAG_NAME }}
           files: |
             ios-out/rrremote-${{ env.VERSION }}-ios-unsigned.ipa
+
+  publish-update-manifest:
+    needs:
+      - build-for-windows-flutter
+      - build-for-macOS
+      - build-rustdesk-linux
+      - build-rustdesk-android
+      - build-rustdesk-ios
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Generate and publish rrremote-update.json manifest (SHA256 verified)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG_NAME: ${{ env.TAG_NAME }}
+          VERSION: ${{ env.VERSION }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/rr-assets
+          gh release download "$TAG_NAME" -R "$REPO" -D /tmp/rr-assets --skip-existing
+          python3 - << 'EOF'
+          import hashlib, json, os
+          from pathlib import Path
+
+          tag = os.environ["TAG_NAME"]
+          version = os.environ["VERSION"]
+          repo = os.environ["REPO"]
+          base_url = f"https://github.com/{repo}/releases/download/{tag}"
+
+          rules = [
+              ("windows", "x86_64", "exe", lambda n: n.endswith("-x86_64.exe")),
+              ("windows", "x86_64", "msi", lambda n: n.endswith("-x86_64.msi")),
+              ("macos", "aarch64", "dmg", lambda n: n.endswith("-aarch64.dmg")),
+              ("macos", "x86_64", "dmg", lambda n: n.endswith("-x86_64.dmg")),
+              ("linux", "x86_64", "pkg.tar.zst", lambda n: n.endswith("x86_64.pkg.tar.zst")),
+              ("linux", "x86_64", "deb", lambda n: n.endswith("-x86_64.deb")),
+              ("android", "aarch64", "apk", lambda n: n.endswith("-aarch64.apk")),
+              ("ios", "aarch64", "ipa", lambda n: n.endswith(".ipa")),
+          ]
+
+          files = sorted(Path("/tmp/rr-assets").iterdir())
+          artifacts = []
+          for platform, arch, fmt, pred in rules:
+              match = next((f for f in files if f.is_file() and pred(f.name)), None)
+              if not match:
+                  continue
+              h = hashlib.sha256()
+              with match.open("rb") as fp:
+                  for chunk in iter(lambda: fp.read(1024 * 1024), b""):
+                      h.update(chunk)
+              artifacts.append({
+                  "platform": platform,
+                  "arch": arch,
+                  "format": fmt,
+                  "url": f"{base_url}/{match.name}",
+                  "file_name": match.name,
+                  "size": match.stat().st_size,
+                  "sha256": h.hexdigest(),
+              })
+
+          manifest = {
+              "schema_version": 1,
+              "app": "rrremote",
+              "version": version,
+              "release_id": tag,
+              "artifacts": artifacts,
+          }
+          out = Path("rrremote-update.json")
+          out.write_text(json.dumps(manifest, indent=2) + "
+", encoding="utf-8")
+          print(out.read_text(encoding="utf-8"))
+          EOF
+          gh release upload "$TAG_NAME" rrremote-update.json -R "$REPO" --clobber

@@ -1,20 +1,22 @@
 #!/usr/bin/env python3
 """
-Apply RRRemote customizations to a checked-out upstream RustDesk source tree.
-
-1. Optional build-time server defaults (read ONLY from environment variables,
-   never stored in this repository).
-2. Zero-rate-limit built-in update checker using GitHub's `/releases/latest`
-   HTTPS redirect (avoids anonymous api.github.com 403 rate limits) and
-   supports `-rrN` custom release suffixes.
-3. Display branding (RRRemote) + industrial-grade UI/UX polish via
-   `apply_ui_polish.py`.
+Apply RRRemote customizations to a checked-out upstream RustDesk source tree:
+1. Disable account/login subsystem cleanly (`is_disable_account() -> true`) so no
+   unwanted login/password screens appear (keeps Recent / Favorites / LAN Discovery).
+2. Replace upstream RustDesk icons & logos across all platforms (Windows/macOS/
+   Linux/Android/iOS/Tray) with the original RRRemote brand suite in `branding/`.
+3. Zero-rate-limit built-in updater via GitHub `/releases/latest` redirect +
+   `-rrN` revision comparison + SHA256-verified `rrremote-update.json` manifest
+   so the app automatically downloads and installs updates upon launch.
+4. Optional build-time server defaults via environment variables (never in git).
+5. Industrial-grade UI & UX polish via `apply_ui_polish.py`.
 """
 
 from __future__ import annotations
 
 import os
 import re
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -35,6 +37,26 @@ def patch_hbb_common_config(root: Path, rendezvous: str, pub_key: str, api_serve
 
     content = read_text(config_rs)
     changed = False
+
+    # 1. Permanently disable account/login UI across all platforms (personal tool)
+    old_disable_acc = (
+        "pub fn is_disable_account() -> bool {\n"
+        '    is_some_hard_opton("disable-account")\n'
+        "}"
+    )
+    new_disable_acc = (
+        "pub fn is_disable_account() -> bool {\n"
+        "    true\n"
+        "}"
+    )
+    if old_disable_acc in content:
+        content = content.replace(old_disable_acc, new_disable_acc, 1)
+        changed = True
+        print("[rrremote] Disabled account/login subsystem globally (is_disable_account -> true).")
+    elif new_disable_acc in content:
+        print("[rrremote] is_disable_account already set to true.")
+    else:
+        raise RuntimeError("Failed to locate is_disable_account() in libs/hbb_common/src/config.rs")
 
     if rendezvous:
         new_content, count = re.subn(
@@ -77,8 +99,8 @@ def patch_hbb_common_config(root: Path, rendezvous: str, pub_key: str, api_serve
         write_text(config_rs, content)
 
 
-def patch_update_checker(root: Path, update_repo: str) -> None:
-    """Redirect built-in update check to GitHub `/releases/latest` (zero API rate limit)."""
+def patch_update_checker(root: Path, update_repo: str, build_tag: str) -> None:
+    """Redirect built-in update check to GitHub `/releases/latest` with -rrN revision support."""
     if "/" not in update_repo:
         raise ValueError(f"Invalid UPDATE_REPO: {update_repo!r}, expected 'owner/repo'")
     owner, repo = update_repo.split("/", 1)
@@ -108,7 +130,7 @@ def patch_update_checker(root: Path, update_repo: str) -> None:
     else:
         raise RuntimeError("release_id_from_update_url pattern not matched in src/common.rs")
 
-    # 2. Strip optional -rrN suffix in display_version_from_release_id (e.g. v1.5.3-rr2 -> 1.5.3)
+    # 2. Support -rrN custom release suffixes in display_version_from_release_id
     old_strip = "let display_version = release_id.strip_prefix('v').unwrap_or(release_id);"
     new_strip = (
         "let display_version = release_id.strip_prefix('v').unwrap_or(release_id)\n"
@@ -118,7 +140,57 @@ def patch_update_checker(root: Path, update_repo: str) -> None:
         content = content.replace(old_strip, new_strip, 1)
         print("[rrremote] Updated display_version_from_release_id to support -rrN suffixes.")
 
-    # 3. Query https://github.com/<owner>/<repo>/releases/latest via HTTP redirect (no API 403 limit)
+    # 3. Compare (base_version_number, rr_revision) against compile-time RRREMOTE_BUILD_TAG
+    old_proc_marker = "fn process_software_update_check_response(bytes: Bytes) -> ResultType<()> {"
+    if old_proc_marker in content and "RRREMOTE_BUILD_TAG" not in content:
+        start = content.index(old_proc_marker)
+        end = content.index("\n// No need to check", start)
+        safe_tag = build_tag.replace('"', "")
+        custom_proc = f'''const RRREMOTE_BUILD_TAG: &str = "{safe_tag}";
+
+fn parse_rr_revision(tag: &str) -> u32 {{
+    if let Some((_, suffix)) = tag.split_once("-rr") {{
+        if let Ok(n) = suffix.parse::<u32>() {{
+            return n;
+        }}
+    }}
+    0
+}}
+
+fn process_software_update_check_response(bytes: Bytes) -> ResultType<()> {{
+    let resp: hbb_common::VersionCheckResponse = serde_json::from_slice(&bytes)?;
+    let response_url = resp.url;
+    let release_id = release_id_from_update_url(&response_url)?;
+    let latest_release_version = display_version_from_release_id(&release_id)?;
+
+    let latest_base = get_version_number(&latest_release_version);
+    let current_base = get_version_number(crate::VERSION);
+    let latest_rev = parse_rr_revision(&release_id);
+    let current_rev = parse_rr_revision(RRREMOTE_BUILD_TAG);
+    let is_newer = (latest_base > current_base)
+        || (latest_base == current_base && latest_rev > current_rev);
+
+    if is_newer {{
+        #[cfg(feature = "flutter")]
+        {{
+            let mut m = HashMap::new();
+            m.insert("name", "check_software_update_finish");
+            m.insert("url", &response_url);
+            if let Ok(data) = serde_json::to_string(&m) {{
+                let _ = crate::flutter::push_global_event(crate::flutter::APP_TYPE_MAIN, data);
+            }}
+        }}
+        *SOFTWARE_UPDATE_URL.lock().unwrap() = response_url;
+    }} else {{
+        clear_software_update_url();
+    }}
+    Ok(())
+}}
+'''
+        content = content[:start] + custom_proc + content[end:]
+        print(f"[rrremote] Wired revision-aware update comparison (current tag: {safe_tag}).")
+
+    # 4. Query https://github.com/<owner>/<repo>/releases/latest via HTTP redirect (zero API 403 limit)
     latest_web_url = f"https://github.com/{owner}/{repo}/releases/latest"
     fn_marker = "pub async fn do_check_software_update() -> hbb_common::ResultType<()> {"
     if fn_marker in content and latest_web_url not in content:
@@ -186,6 +258,104 @@ def patch_update_checker(root: Path, update_repo: str) -> None:
     write_text(common_rs, content)
 
 
+def patch_updater_artifact_resolver(root: Path, update_repo: str) -> None:
+    """Resolve platform installers from rrremote-update.json on GitHub Releases with SHA256."""
+    artifact_rs = root / "src" / "updater" / "artifact.rs"
+    if not artifact_rs.exists():
+        raise FileNotFoundError(f"Expected {artifact_rs}")
+
+    content = read_text(artifact_rs)
+    if "rrremote-update.json" in content:
+        print("[rrremote] src/updater/artifact.rs already patched for rrremote-update.json.")
+        return
+
+    old_fn = '''pub(super) fn verified_update_artifact_from_release_page_url(
+    update_url: &str,
+    query: &UpdateArtifactQuery<'_>,
+) -> ResultType<VerifiedUpdateArtifact> {
+    let release_id = release_id_from_update_url(update_url)?;
+    let display_version = display_version_from_release_id(&release_id)?;
+    let expected_artifact_url_prefix =
+        format!("https://github.com/rustdesk/rustdesk/releases/download/{release_id}/");
+    let metadata_url = format!("{expected_artifact_url_prefix}rustdesk-update.json");
+    let signature_url = format!("{metadata_url}.sig");
+    let metadata_bytes = fetch_update_sidecar_bytes(&metadata_url)?;
+    let signature_bytes = fetch_update_sidecar_bytes(&signature_url)?;
+    let requirements = UpdateMetadataRequirements {
+        expected_version: display_version.as_str(),
+        expected_release_id: release_id.as_str(),
+        expected_artifact_url_prefix: expected_artifact_url_prefix.as_str(),
+        artifact: *query,
+    };
+    crate::update_metadata::verify_update_metadata(&metadata_bytes, &signature_bytes, requirements)
+}'''
+
+    new_fn = f'''#[derive(serde_derive::Deserialize)]
+struct RrManifest {{
+    version: String,
+    artifacts: Vec<RrManifestArtifact>,
+}}
+
+#[derive(serde_derive::Deserialize)]
+struct RrManifestArtifact {{
+    platform: String,
+    arch: String,
+    format: String,
+    url: String,
+    file_name: String,
+    size: u64,
+    sha256: String,
+}}
+
+pub(super) fn verified_update_artifact_from_release_page_url(
+    update_url: &str,
+    query: &UpdateArtifactQuery<'_>,
+) -> ResultType<VerifiedUpdateArtifact> {{
+    let release_id = release_id_from_update_url(update_url)?;
+    let _display_version = display_version_from_release_id(&release_id)?;
+    let expected_prefix =
+        format!("https://github.com/{update_repo}/releases/download/{{release_id}}/");
+    let manifest_url = format!("{{expected_prefix}}rrremote-update.json");
+    let manifest_bytes = fetch_update_sidecar_bytes(&manifest_url)?;
+    let manifest: RrManifest = serde_json::from_slice(&manifest_bytes)?;
+    let Some(item) = manifest.artifacts.into_iter().find(|a| {{
+        a.platform == query.platform && a.arch == query.arch && a.format == query.format
+    }}) else {{
+        bail!(
+            "No RRRemote update artifact for {{}}/{{}}/{{}} in {{}}",
+            query.platform,
+            query.arch,
+            query.format,
+            release_id
+        );
+    }};
+    if !item.url.starts_with(&expected_prefix) {{
+        bail!("Unexpected RRRemote update artifact URL: {{}}", item.url);
+    }}
+    Ok(VerifiedUpdateArtifact {{
+        version: manifest.version,
+        url: item.url,
+        #[cfg(target_os = "macos")]
+        file_name: item.file_name,
+        size: item.size,
+        sha256: item.sha256,
+    }})
+}}'''
+
+    if old_fn not in content:
+        raise RuntimeError("Failed to match verified_update_artifact_from_release_page_url in src/updater/artifact.rs")
+
+    content = content.replace(old_fn, new_fn, 1)
+    # Silence unused import warning for UpdateMetadataRequirements
+    content = content.replace(
+        "update_metadata::{UpdateArtifactQuery, UpdateMetadataRequirements, VerifiedUpdateArtifact},",
+        "update_metadata::{UpdateArtifactQuery, VerifiedUpdateArtifact},",
+        1,
+    )
+    write_text(artifact_rs, content)
+    print(f"[rrremote] Wired SHA256-verified in-app update manifest resolver for {update_repo}.")
+
+
 def patch_default_api_server_fallback(root: Path, api_server: str) -> None:
     if not api_server:
         return
@@ -204,6 +374,73 @@ def patch_default_api_server_fallback(root: Path, api_server: str) -> None:
             content = content[:idx] + patched_snippet + content[idx + 1200 :]
             write_text(common_rs, content)
             print("[rrremote] Wired default API server fallback in src/common.rs.")
+
+
+def apply_brand_icons(root: Path) -> None:
+    """Replace upstream logos & icons across all platforms with RRRemote brand assets."""
+    branding_dir = Path(__file__).resolve().parent.parent / "branding"
+    if not branding_dir.exists():
+        print("[rrremote] No branding/ directory found; skipping icon replacement.")
+        return
+
+    copy_map = [
+        ("icon.svg", "flutter/assets/icon.svg"),
+        ("icon.svg", "res/icon.svg"),
+        ("icon.svg", "res/logo.svg"),
+        ("icon.svg", "res/logo-header.svg"),
+        ("icon-512.png", "flutter/assets/icon.png"),
+        ("icon-512.png", "res/icon.png"),
+        ("icon-512.png", "res/mac-icon.png"),
+        ("icon.ico", "res/icon.ico"),
+        ("icon.ico", "res/tray-icon.ico"),
+        ("icon.ico", "flutter/windows/runner/resources/app_icon.ico"),
+        ("AppIcon.icns", "flutter/macos/Runner/AppIcon.icns"),
+        ("tray-dark.png", "res/mac-tray-dark-x2.png"),
+        ("tray-light.png", "res/mac-tray-light-x2.png"),
+    ]
+    copied = 0
+    for src_name, dst_rel in copy_map:
+        src = branding_dir / src_name
+        dst = root / dst_rel
+        if src.exists() and dst.parent.exists():
+            shutil.copy2(src, dst)
+            copied += 1
+    print(f"[rrremote] Applied {copied} desktop/SVG/ICO/ICNS brand assets.")
+
+    # Resize & replace Android mipmap and iOS AppIcon PNGs if Pillow is available
+    master_png = branding_dir / "icon-1024.png"
+    if master_png.exists():
+        try:
+            from PIL import Image
+
+            master = Image.open(master_png).convert("RGBA")
+            mobile_targets = []
+            android_res = root / "flutter" / "android" / "app" / "src" / "main" / "res"
+            if android_res.exists():
+                for p in android_res.rglob("*.png"):
+                    if p.name in ("ic_launcher.png", "ic_launcher_round.png", "ic_stat_logo.png"):
+                        mobile_targets.append(p)
+            ios_icons = root / "flutter" / "ios" / "Runner" / "Assets.xcassets" / "AppIcon.appiconset"
+            if ios_icons.exists():
+                for p in ios_icons.glob("*.png"):
+                    mobile_targets.append(p)
+
+            replaced_mobile = 0
+            for target in mobile_targets:
+                with Image.open(target) as orig:
+                    sz = orig.size
+                resized = master.resize(sz, Image.Resampling.LANCZOS)
+                # iOS AppIcon must not contain transparency (composite over deep slate #0F172A)
+                if "AppIcon.appiconset" in str(target):
+                    bg = Image.new("RGB", sz, (15, 23, 42))
+                    bg.paste(resized, (0, 0), resized)
+                    bg.save(target, format="PNG", optimize=True)
+                else:
+                    resized.save(target, format="PNG", optimize=True)
+                replaced_mobile += 1
+            print(f"[rrremote] Replaced {replaced_mobile} Android/iOS app icon PNGs.")
+        except ImportError:
+            print("[rrremote] Pillow not installed on runner; skipping mobile PNG resizing.")
 
 
 def patch_display_branding(root: Path, display_name: str) -> None:
@@ -232,21 +469,24 @@ def main() -> int:
     root = Path(sys.argv[1]).resolve() if len(sys.argv) > 1 else Path.cwd()
     display_name = os.environ.get("APP_DISPLAY_NAME", "RRRemote").strip()
     update_repo = os.environ.get("UPDATE_REPO", "melotusme/RRRemote").strip()
+    build_tag = os.environ.get("RR_BUILD_TAG", "v1.5.3-rr3").strip()
     rendezvous = os.environ.get("RR_RENDEZVOUS_SERVER", "").strip()
     pub_key = os.environ.get("RR_PUB_KEY", "").strip()
     api_server = os.environ.get("RR_API_SERVER", "").strip()
 
     print(f"[rrremote] Applying customizations to {root}")
-    print(f"[rrremote] Display name: {display_name}, Update repo: {update_repo}")
+    print(f"[rrremote] Display name: {display_name}, Update repo: {update_repo}, Build tag: {build_tag}")
     print(
         "[rrremote] Build-time server preset:",
         "enabled" if (rendezvous or pub_key or api_server) else "disabled (configure in-app)",
     )
 
     patch_hbb_common_config(root, rendezvous, pub_key, api_server)
-    patch_update_checker(root, update_repo)
+    patch_update_checker(root, update_repo, build_tag)
+    patch_updater_artifact_resolver(root, update_repo)
     patch_default_api_server_fallback(root, api_server)
     patch_display_branding(root, display_name)
+    apply_brand_icons(root)
 
     ui_script = Path(__file__).resolve().parent / "apply_ui_polish.py"
     if ui_script.exists():

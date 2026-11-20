@@ -430,6 +430,89 @@ def patch_common_theme(root: Path) -> None:
         "Curated industrial str2color device card palette",
     )
 
+    # 8. Brand header logo in left host pane (RRRemote icon + wordmark)
+    txt = replace_exact(
+        txt,
+        """class _Logo extends StatefulWidget {
+  const _Logo();
+
+  @override
+  State<_Logo> createState() => _LogoState();
+}
+
+class _LogoState extends State<_Logo> {
+  final Map<Brightness, Future<String?>> _logoFutures = {};
+
+  Future<String?> _logoFutureFor(Brightness brightness) {
+    return _logoFutures.putIfAbsent(
+      brightness,
+      () => _resolveLogoAsset(brightness),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return FutureBuilder<String?>(
+      future: _logoFutureFor(Theme.of(context).brightness),
+      builder: (BuildContext context, AsyncSnapshot<String?> snapshot) {
+        final asset = snapshot.data;
+        if (asset != null) {
+          final image = Image.asset(
+            asset,
+            fit: BoxFit.contain,
+            errorBuilder: (ctx, error, stackTrace) {
+              return Container();
+            },
+          );
+          return Container(
+            constraints: BoxConstraints(maxWidth: 300, maxHeight: 60),
+            child: image,
+          ).marginOnly(left: 12, right: 12, top: 12);
+        }
+        return const Offstage();
+      },
+    );
+  }
+}""",
+        """class _Logo extends StatefulWidget {
+  const _Logo();
+
+  @override
+  State<_Logo> createState() => _LogoState();
+}
+
+class _LogoState extends State<_Logo> {
+  @override
+  Widget build(BuildContext context) {
+    final textColor = Theme.of(context).textTheme.titleLarge?.color;
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(18, 16, 14, 4),
+      child: Row(
+        mainAxisSize: MainAxisSize.max,
+        crossAxisAlignment: CrossAxisAlignment.center,
+        children: [
+          ClipRRect(
+            borderRadius: BorderRadius.circular(8),
+            child: loadIcon(28),
+          ),
+          const SizedBox(width: 10),
+          Text(
+            'RRRemote',
+            style: TextStyle(
+              fontSize: 17,
+              fontWeight: FontWeight.w700,
+              letterSpacing: 0.3,
+              color: textColor,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}""",
+        "RRRemote branded left-pane header logo",
+    )
+
     write_text(p, txt)
 
 
@@ -534,7 +617,7 @@ def patch_desktop_home_page(root: Path, update_repo: str) -> None:
         "Tabular numerals for host password",
     )
 
-    # 4. Redirect desktop update card links to RRRemote GitHub Releases
+    # 4. Redirect desktop update card links to RRRemote GitHub Releases & auto-download on startup
     txt = replace_exact(
         txt,
         "final Uri url = Uri.parse('https://rustdesk.com/download');",
@@ -546,6 +629,37 @@ def patch_desktop_home_page(root: Path, update_repo: str) -> None:
         "'https://github.com/rustdesk/rustdesk/releases/tag/${bind.mainGetNewVersion()}'",
         f"'https://github.com/{update_repo}/releases/tag/${{bind.mainGetNewVersion()}}'",
         "Redirect desktop changelog URL to RRRemote repo",
+    )
+    txt = replace_exact(
+        txt,
+        """  Timer? _updateTimer;
+  bool isCardClosed = false;""",
+        """  Timer? _updateTimer;
+  bool isCardClosed = false;
+  bool _autoDownloadTriggered = false;""",
+        "Add auto-download guard flag in DesktopHomePage",
+    )
+    txt = replace_exact(
+        txt,
+        """      if (isToUpdate) {
+        onPressed = () {
+          handleUpdate(updateUrl);
+        };
+      }""",
+        """      if (isToUpdate) {
+        onPressed = () {
+          handleUpdate(updateUrl);
+        };
+        if (!_autoDownloadTriggered) {
+          _autoDownloadTriggered = true;
+          WidgetsBinding.instance.addPostFrameCallback((_) {
+            if (mounted) {
+              handleUpdate(updateUrl);
+            }
+          });
+        }
+      }""",
+        "Auto-trigger in-app update download on app launch",
     )
 
     # 5. Replace garish pink-magenta buildInstallCard with refined slate-indigo card
