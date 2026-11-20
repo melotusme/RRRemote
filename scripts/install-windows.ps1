@@ -152,24 +152,28 @@ if ($currentTag -ne $tag) {
         throw "Installation verification failed: C:\Program Files\RRRemote\RRRemote.exe not found"
     }
 
-    # Ensure branded RRRemote Desktop & Start Menu shortcuts (and clean legacy RustDesk shortcut)
+    # Ensure a single RRRemote Desktop & Start Menu shortcut (avoid duplicating MSI's Public shortcuts)
     try {
-        $wshell = New-Object -ComObject WScript.Shell
-        $targetDir = Split-Path -Parent $targetExe
         $desktopDir = [Environment]::GetFolderPath("Desktop")
+        $pubDesktop = "C:\Users\Public\Desktop"
         $startMenuDir = Join-Path $env:APPDATA "Microsoft\Windows\Start Menu\Programs"
-        foreach ($scPath in @(
-            (Join-Path $desktopDir "RRRemote.lnk"),
-            (Join-Path $startMenuDir "RRRemote.lnk")
-        )) {
-            $sc = $wshell.CreateShortcut($scPath)
+        $pubStartMenu = "C:\ProgramData\Microsoft\Windows\Start Menu\Programs\RRRemote"
+        Remove-Item (Join-Path $desktopDir "RustDesk.lnk") -Force -ErrorAction SilentlyContinue
+        Remove-Item (Join-Path $pubDesktop "RustDesk.lnk") -Force -ErrorAction SilentlyContinue
+        if (Test-Path (Join-Path $pubDesktop "RRRemote.lnk")) {
+            Remove-Item (Join-Path $desktopDir "RRRemote.lnk") -Force -ErrorAction SilentlyContinue
+        } else {
+            $wshell = New-Object -ComObject WScript.Shell
+            $sc = $wshell.CreateShortcut((Join-Path $desktopDir "RRRemote.lnk"))
             $sc.TargetPath = $targetExe
-            $sc.WorkingDirectory = $targetDir
+            $sc.WorkingDirectory = (Split-Path -Parent $targetExe)
             $sc.IconLocation = "$targetExe,0"
             $sc.Description = "RRRemote Remote Desktop"
             $sc.Save()
         }
-        Remove-Item (Join-Path $desktopDir "RustDesk.lnk") -Force -ErrorAction SilentlyContinue
+        if (Test-Path $pubStartMenu) {
+            Remove-Item (Join-Path $startMenuDir "RRRemote.lnk") -Force -ErrorAction SilentlyContinue
+        }
     } catch {
         Write-Warning "Shortcut refresh skipped: $_"
     }
