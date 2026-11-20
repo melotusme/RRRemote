@@ -176,6 +176,10 @@ def update_file(path: Path, server: str, relay: str, key: str, api_server: str, 
         content = upsert_toml_option(content, "direct-server", "Y")
     content = upsert_toml_option(content, "stop-service", "")
     content = upsert_toml_option(content, "av1-test", "N")
+    # On macOS (especially macOS 26/27+), VideoToolbox H265 RAM encoder can fail with -1;
+    # Apple Silicon VP9/AV1 software encode is rock-solid and <3% CPU.
+    if platform.system() == "Darwin":
+        content = upsert_toml_option(content, "enable-hwcodec", "N")
     # Personal full-access mode: enable all capabilities & optimal ergonomics by default
     for k, v in (
         ("view-style", "adaptive"),
