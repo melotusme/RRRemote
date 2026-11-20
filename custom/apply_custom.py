@@ -843,11 +843,72 @@ post_remove() {{
             print(f"[rrremote] Updated iOS Info.plist display name to {display_name}.")
 
 
+def patch_personal_ergonomics(root: Path) -> None:
+    """Apply personal-use zero-password auto-approve (key-gated) and TUN fake-IP immunity."""
+    # 1. Personal zero-password auto-approve on private key-authenticated self-hosted servers:
+    #    When the host has a custom server Ed25519 `key` configured (so only devices with the
+    #    owner's private key can reach it via hbbs/hbbr) and approve-mode is not explicitly
+    #    set to "click", immediately authorize incoming sessions without prompting for a password.
+    conn_rs = root / "src" / "server" / "connection.rs"
+    if conn_rs.exists():
+        txt = read_text(conn_rs)
+        old_auth = """            if (password::approve_mode() == ApproveMode::Click && !allow_logon_screen_password)
+                || password::approve_mode() == ApproveMode::Both && !password::has_valid_password()"""
+        new_auth = """            if !Config::get_option("key").is_empty()
+                && Config::get_option("approve-mode") != "click"
+            {
+                if !self.send_logon_response_and_keep_alive().await {
+                    return false;
+                }
+                self.try_start_cm(lr.my_id.clone(), lr.my_name.clone(), self.authorized);
+            } else if (password::approve_mode() == ApproveMode::Click && !allow_logon_screen_password)
+                || password::approve_mode() == ApproveMode::Both && !password::has_valid_password()"""
+        if new_auth in txt:
+            print("[rrremote] Personal key-gated auto-approve already patched in src/server/connection.rs.")
+        elif old_auth in txt:
+            txt = txt.replace(old_auth, new_auth, 1)
+            write_text(conn_rs, txt)
+            print("[rrremote] Enabled key-gated zero-password auto-approve in src/server/connection.rs.")
+        else:
+            raise RuntimeError("Failed to locate login approve block in src/server/connection.rs")
+
+    # 2. TUN fake-IP (RFC 2544 benchmarking range, octets 198.18/19) immunity in handle_intranet_:
+    #    When Clash Verge / Shadowrocket / sing-box TUN mode routes the rendezvous server through
+    #    a virtual TUN interface, binding a LAN listener on the virtual TUN IP causes every
+    #    intranet connection to time out. Skip intranet listen on RFC 2544 TUN IPs so handle_intranet
+    #    falls back cleanly to relay/P2P immediately.
+    med_rs = root / "src" / "rendezvous_mediator.rs"
+    if med_rs.exists():
+        txt = read_text(med_rs)
+        old_local = """        let local_addr = socket.local_addr();
+        // we saw invalid local_addr while using proxy, local_addr.ip() == "::1"
+        let local_addr: SocketAddr =
+            format!("{}:{}", local_addr.ip(), local_addr.port()).parse()?;"""
+        new_local = """        let local_addr = socket.local_addr();
+        if let std::net::IpAddr::V4(v4) = local_addr.ip() {
+            let oct = v4.octets();
+            if oct[0] == 198 && (oct[1] == 18 || oct[1] == 19) {
+                bail!("Skip intranet listen on TUN fake-IP {}", local_addr);
+            }
+        }
+        // we saw invalid local_addr while using proxy, local_addr.ip() == "::1"
+        let local_addr: SocketAddr =
+            format!("{}:{}", local_addr.ip(), local_addr.port()).parse()?;"""
+        if "Skip intranet listen on TUN fake-IP" in txt:
+            print("[rrremote] TUN fake-IP intranet guard already patched in src/rendezvous_mediator.rs.")
+        elif old_local in txt:
+            txt = txt.replace(old_local, new_local, 1)
+            write_text(med_rs, txt)
+            print("[rrremote] Added TUN fake-IP intranet guard in src/rendezvous_mediator.rs.")
+        else:
+            raise RuntimeError("Failed to locate handle_intranet_ local_addr in src/rendezvous_mediator.rs")
+
+
 def main() -> int:
     root = Path(sys.argv[1]).resolve() if len(sys.argv) > 1 else Path.cwd()
     display_name = os.environ.get("APP_DISPLAY_NAME", "RRRemote").strip()
     update_repo = os.environ.get("UPDATE_REPO", "melotusme/RRRemote").strip()
-    build_tag = os.environ.get("RR_BUILD_TAG", "v1.5.3-rr5").strip()
+    build_tag = os.environ.get("RR_BUILD_TAG", "v1.5.3-rr6").strip()
     rendezvous = os.environ.get("RR_RENDEZVOUS_SERVER", "").strip()
     pub_key = os.environ.get("RR_PUB_KEY", "").strip()
     api_server = os.environ.get("RR_API_SERVER", "").strip()
@@ -863,6 +924,7 @@ def main() -> int:
     patch_update_checker(root, update_repo, build_tag)
     patch_updater_artifact_resolver(root, update_repo)
     patch_default_api_server_fallback(root, api_server)
+    patch_personal_ergonomics(root)
     patch_display_branding(root, display_name)
     apply_brand_icons(root)
 
