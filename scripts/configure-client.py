@@ -101,13 +101,30 @@ def upsert_top_level(content: str, key: str, value: str) -> str:
     return head + tail
 
 
+def _has_port(addr: str) -> bool:
+    if addr.startswith("["):
+        return "]:" in addr
+    return addr.count(":") == 1
+
+
+def _derive_relay_from_server(server: str) -> str:
+    if _has_port(server):
+        host, port_s = server.rsplit(":", 1)
+        if port_s.isdigit():
+            return f"{host}:{int(port_s) + 1}"
+    return server
+
+
 def update_file(path: Path, server: str, relay: str, key: str, api_server: str, direct_ip: bool) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     content = path.read_text(encoding="utf-8") if path.exists() else ""
 
-    content = upsert_top_level(content, "rendezvous_server", f"{server}:21116")
+    rendezvous_addr = server if _has_port(server) else f"{server}:21116"
+    relay_addr = relay or _derive_relay_from_server(server)
+
+    content = upsert_top_level(content, "rendezvous_server", rendezvous_addr)
     content = upsert_toml_option(content, "custom-rendezvous-server", server)
-    content = upsert_toml_option(content, "relay-server", relay or server)
+    content = upsert_toml_option(content, "relay-server", relay_addr)
     if key:
         content = upsert_toml_option(content, "key", key)
     if api_server:

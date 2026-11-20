@@ -125,6 +125,10 @@ if [[ "${CURRENT_TAG}" != "${DESIRED_TAG}" ]]; then
 
   echo "[rrremote] Installing ${APP_NAME} to /Applications..."
   pkill -x RustDesk 2>/dev/null || true
+  pkill -x RRRemote 2>/dev/null || true
+  if [[ "${APP_NAME}" == "RRRemote.app" && -d "/Applications/RustDesk.app" ]]; then
+    rm -rf "/Applications/RustDesk.app"
+  fi
   rm -rf "/Applications/${APP_NAME}"
   cp -R "${APP_SRC}" "/Applications/${APP_NAME}"
   xattr -dr com.apple.quarantine "/Applications/${APP_NAME}" 2>/dev/null || true

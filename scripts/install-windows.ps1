@@ -139,6 +139,28 @@ if ($currentTag -ne $tag) {
         throw "Installation verification failed: C:\Program Files\RustDesk\rustdesk.exe not found"
     }
 
+    # Ensure branded RRRemote Desktop & Start Menu shortcuts (and clean legacy RustDesk shortcut)
+    try {
+        $wshell = New-Object -ComObject WScript.Shell
+        $targetExe = "C:\Program Files\RustDesk\rustdesk.exe"
+        $desktopDir = [Environment]::GetFolderPath("Desktop")
+        $startMenuDir = Join-Path $env:APPDATA "Microsoft\Windows\Start Menu\Programs"
+        foreach ($scPath in @(
+            (Join-Path $desktopDir "RRRemote.lnk"),
+            (Join-Path $startMenuDir "RRRemote.lnk")
+        )) {
+            $sc = $wshell.CreateShortcut($scPath)
+            $sc.TargetPath = $targetExe
+            $sc.WorkingDirectory = "C:\Program Files\RustDesk"
+            $sc.IconLocation = "$targetExe,0"
+            $sc.Description = "RRRemote Remote Desktop"
+            $sc.Save()
+        }
+        Remove-Item (Join-Path $desktopDir "RustDesk.lnk") -Force -ErrorAction SilentlyContinue
+    } catch {
+        Write-Warning "Shortcut refresh skipped: $_"
+    }
+
     Set-Content -Path $VersionFile -Value $tag -Encoding UTF8
     Remove-Item -Path $dlPath -Force -ErrorAction SilentlyContinue
     Write-Host "[rrremote] Installed $tag."

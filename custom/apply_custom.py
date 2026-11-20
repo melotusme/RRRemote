@@ -357,23 +357,37 @@ pub(super) fn verified_update_artifact_from_release_page_url(
 
 
 def patch_default_api_server_fallback(root: Path, api_server: str) -> None:
-    if not api_server:
-        return
     common_rs = root / "src" / "common.rs"
     content = read_text(common_rs)
-    marker = 'pub fn get_api_server(custom: String) -> String {'
-    if marker in content and "RRREMOTE_DEFAULT_API_SERVER" not in content:
-        idx = content.index(marker)
-        snippet = content[idx : idx + 1200]
-        if 'return "".to_owned();' in snippet:
-            patched_snippet = snippet.replace(
-                'return "".to_owned();',
-                'return hbb_common::config::RRREMOTE_DEFAULT_API_SERVER.to_owned();',
-                1,
-            )
-            content = content[:idx] + patched_snippet + content[idx + 1200 :]
-            write_text(common_rs, content)
-            print("[rrremote] Wired default API server fallback in src/common.rs.")
+    if api_server:
+        marker = 'pub fn get_api_server(api: String, custom: String) -> String {'
+        if marker in content and "RRREMOTE_DEFAULT_API_SERVER" not in content:
+            idx = content.index(marker)
+            snippet = content[idx : idx + 1200]
+            if 'return "".to_owned();' in snippet:
+                patched_snippet = snippet.replace(
+                    'return "".to_owned();',
+                    'return hbb_common::config::RRREMOTE_DEFAULT_API_SERVER.to_owned();',
+                    1,
+                )
+                content = content[:idx] + patched_snippet + content[idx + 1200 :]
+                write_text(common_rs, content)
+                print("[rrremote] Wired default API server fallback in src/common.rs.")
+        return
+
+    # Account/login disabled and no explicit API server: avoid pointless :21114/:31114 HTTP timeouts
+    old_api_fn = """pub fn get_api_server(api: String, custom: String) -> String {
+    if Config::no_register_device() {
+        return "".to_owned();
+    }"""
+    new_api_fn = """pub fn get_api_server(api: String, custom: String) -> String {
+    if Config::no_register_device() || (api.is_empty() && config::is_disable_account()) {
+        return "".to_owned();
+    }"""
+    if old_api_fn in content:
+        content = content.replace(old_api_fn, new_api_fn, 1)
+        write_text(common_rs, content)
+        print("[rrremote] Disabled implicit API server fallback when account login is disabled.")
 
 
 def apply_brand_icons(root: Path) -> None:
@@ -388,6 +402,8 @@ def apply_brand_icons(root: Path) -> None:
         ("icon.svg", "res/icon.svg"),
         ("icon.svg", "res/logo.svg"),
         ("icon.svg", "res/logo-header.svg"),
+        ("icon.svg", "res/scalable.svg"),
+        ("icon-256.png", "res/128x128@2x.png"),
         ("icon-512.png", "flutter/assets/icon.png"),
         ("icon-512.png", "res/icon.png"),
         ("icon-512.png", "res/mac-icon.png"),
@@ -447,6 +463,7 @@ def patch_display_branding(root: Path, display_name: str) -> None:
     if not display_name or display_name == "RustDesk":
         return
 
+    # 1. Flutter Dart window title
     flutter_main = root / "flutter" / "lib" / "main.dart"
     if flutter_main.exists():
         txt = read_text(flutter_main)
@@ -456,6 +473,36 @@ def patch_display_branding(root: Path, display_name: str) -> None:
             write_text(flutter_main, updated)
             print(f"[rrremote] Updated Flutter app title to {display_name}.")
 
+    # 2. Rust FFI UI app name (dialogs, menus, about, tips) & system tray tooltip
+    #    Keep hbb_common::config::APP_NAME intact so existing config paths/IDs/favorites migrate seamlessly.
+    ffi_rs = root / "src" / "flutter_ffi.rs"
+    if ffi_rs.exists():
+        txt = read_text(ffi_rs)
+        updated = txt.replace(
+            "pub fn main_get_app_name() -> String {\n    get_app_name()\n}",
+            f'pub fn main_get_app_name() -> String {{\n    "{display_name}".to_owned()\n}}',
+            1,
+        ).replace(
+            "pub fn main_get_app_name_sync() -> SyncReturn<String> {\n    SyncReturn(get_app_name())\n}",
+            f'pub fn main_get_app_name_sync() -> SyncReturn<String> {{\n    SyncReturn("{display_name}".to_owned())\n}}',
+            1,
+        )
+        if updated != txt:
+            write_text(ffi_rs, updated)
+            print(f"[rrremote] Updated Flutter FFI UI app name to {display_name}.")
+
+    tray_rs = root / "src" / "tray.rs"
+    if tray_rs.exists():
+        txt = read_text(tray_rs)
+        updated = txt.replace(
+            '"{} {}",\n                crate::get_app_name(),',
+            f'"{{}} {{}}",\n                "{display_name}",',
+        )
+        if updated != txt:
+            write_text(tray_rs, updated)
+            print(f"[rrremote] Updated system tray tooltip brand to {display_name}.")
+
+    # 3. Windows runner title & executable file version metadata (Task Manager / File Properties)
     win_main = root / "flutter" / "windows" / "runner" / "main.cpp"
     if win_main.exists():
         txt = read_text(win_main)
@@ -464,12 +511,170 @@ def patch_display_branding(root: Path, display_name: str) -> None:
             write_text(win_main, updated)
             print(f"[rrremote] Updated Windows runner title to {display_name}.")
 
+    win_rc = root / "flutter" / "windows" / "runner" / "Runner.rc"
+    if win_rc.exists():
+        txt = read_text(win_rc)
+        updated = (
+            txt.replace('VALUE "CompanyName", "Purslane Tech Pte. Ltd."', f'VALUE "CompanyName", "{display_name}"')
+            .replace('VALUE "FileDescription", "RustDesk Remote Desktop"', f'VALUE "FileDescription", "{display_name} Remote Desktop"')
+            .replace('VALUE "ProductName", "RustDesk"', f'VALUE "ProductName", "{display_name}"')
+            .replace('Copyright © 2026 Purslane Tech Pte. Ltd.', f'Copyright © 2026 {display_name}.')
+        )
+        if updated != txt:
+            write_text(win_rc, updated)
+            print(f"[rrremote] Updated Windows Runner.rc product metadata to {display_name}.")
+
+    # 4. macOS app bundle name (RRRemote.app), DisplayName, Menu Bar & self-updater bundle path
+    mac_xcconfig = root / "flutter" / "macos" / "Runner" / "Configs" / "AppInfo.xcconfig"
+    if mac_xcconfig.exists():
+        txt = read_text(mac_xcconfig)
+        updated = txt.replace("PRODUCT_NAME = RustDesk", f"PRODUCT_NAME = {display_name}")
+        updated = updated.replace(
+            "PRODUCT_COPYRIGHT = Copyright © 2026 Purslane Tech Pte. Ltd. All rights reserved.",
+            f"PRODUCT_COPYRIGHT = Copyright © 2026 {display_name}. All rights reserved.",
+        )
+        if updated != txt:
+            write_text(mac_xcconfig, updated)
+            print(f"[rrremote] Updated macOS AppInfo.xcconfig PRODUCT_NAME to {display_name}.")
+
+    mac_plist = root / "flutter" / "macos" / "Runner" / "Info.plist"
+    if mac_plist.exists():
+        txt = read_text(mac_plist)
+        updated = txt
+        if "<key>CFBundleDisplayName</key>" not in updated:
+            updated = updated.replace(
+                "\t<key>CFBundleExecutable</key>",
+                f"\t<key>CFBundleDisplayName</key>\n\t<string>{display_name}</string>\n\t<key>CFBundleExecutable</key>",
+                1,
+            )
+        if updated != txt:
+            write_text(mac_plist, updated)
+            print(f"[rrremote] Added macOS CFBundleDisplayName={display_name} to Info.plist.")
+
+    mac_menu = root / "flutter" / "macos" / "Runner" / "Base.lproj" / "MainMenu.xib"
+    if mac_menu.exists():
+        txt = read_text(mac_menu)
+        updated = txt.replace('customModule="RustDesk"', f'customModule="{display_name}"').replace(
+            "APP_NAME", display_name
+        )
+        if updated != txt:
+            write_text(mac_menu, updated)
+            print(f"[rrremote] Updated macOS MainMenu.xib menu bar & customModule to {display_name}.")
+
+    mac_pbxproj = root / "flutter" / "macos" / "Runner.xcodeproj" / "project.pbxproj"
+    if mac_pbxproj.exists():
+        txt = read_text(mac_pbxproj)
+        updated = txt.replace("/* RustDesk.app */", f"/* {display_name}.app */").replace(
+            "path = RustDesk.app;", f"path = {display_name}.app;"
+        )
+        if updated != txt:
+            write_text(mac_pbxproj, updated)
+            print(f"[rrremote] Updated macOS project.pbxproj product reference to {display_name}.app.")
+
+    build_py = root / "build.py"
+    if build_py.exists():
+        txt = read_text(build_py)
+        updated = txt.replace(
+            "Release/RustDesk.app/Contents/MacOS/",
+            f"Release/{display_name}.app/Contents/MacOS/",
+        )
+        if updated != txt:
+            write_text(build_py, updated)
+            print(f"[rrremote] Updated build.py macOS app bundle path to {display_name}.app.")
+
+    mac_rs = root / "src" / "platform" / "macos.rs"
+    if mac_rs.exists():
+        txt = read_text(mac_rs)
+        updated = txt
+        updated = updated.replace(
+            '.starts_with(&format!("/Applications/{}.app", crate::get_app_name()));',
+            f'.starts_with("/Applications/{display_name}.app");',
+            1,
+        )
+        updated = updated.replace(
+            'fn update_me_from_source(update_source: UpdateSource) -> ResultType<()> {\n    let app_name = crate::get_app_name();',
+            f'fn update_me_from_source(update_source: UpdateSource) -> ResultType<()> {{\n    let app_name = "{display_name}".to_owned();',
+            1,
+        )
+        updated = updated.replace(
+            '        guard.mount_point(),\n            crate::get_app_name()\n        ))',
+            f'        guard.mount_point(),\n            "{display_name}"\n        ))',
+            1,
+        )
+        updated = updated.replace(
+            '        .arg(&format!("/Applications/{}.app", crate::get_app_name()))',
+            f'        .arg("/Applications/{display_name}.app")',
+        )
+        if updated != txt:
+            write_text(mac_rs, updated)
+            print(f"[rrremote] Updated macOS bundle/updater paths in src/platform/macos.rs to {display_name}.app.")
+
+    # 5. Linux desktop entries & GTK window title
+    for desktop_rel in ("res/rustdesk.desktop", "res/rustdesk-link.desktop"):
+        dp = root / desktop_rel
+        if dp.exists():
+            txt = read_text(dp)
+            updated = txt.replace("Name=RustDesk", f"Name={display_name}").replace(
+                "Comment=Remote Desktop", f"Comment={display_name} Remote Desktop"
+            )
+            if updated != txt:
+                write_text(dp, updated)
+                print(f"[rrremote] Updated {desktop_rel} Name to {display_name}.")
+
+    linux_app = root / "flutter" / "linux" / "my_application.cc"
+    if linux_app.exists():
+        txt = read_text(linux_app)
+        updated = txt.replace(
+            'gtk_header_bar_set_title(header_bar, "rustdesk");',
+            f'gtk_header_bar_set_title(header_bar, "{display_name}");',
+        ).replace(
+            'gtk_window_set_title(window, "rustdesk");',
+            f'gtk_window_set_title(window, "{display_name}");',
+        )
+        if updated != txt:
+            write_text(linux_app, updated)
+            print(f"[rrremote] Updated Linux GTK window title to {display_name}.")
+
+    # 6. Android label & modern Gradle mavenCentral() repository
+    android_manifest = root / "flutter" / "android" / "app" / "src" / "main" / "AndroidManifest.xml"
+    if android_manifest.exists():
+        txt = read_text(android_manifest)
+        updated = txt.replace('android:label="RustDesk"', f'android:label="{display_name}"').replace(
+            'android:label="RustDesk Input"', f'android:label="{display_name} Input"'
+        )
+        if updated != txt:
+            write_text(android_manifest, updated)
+            print(f"[rrremote] Updated AndroidManifest.xml labels to {display_name}.")
+
+    android_gradle = root / "flutter" / "android" / "build.gradle"
+    if android_gradle.exists():
+        txt = read_text(android_gradle)
+        if "mavenCentral()" not in txt and "jcenter()" in txt:
+            updated = txt.replace("        jcenter()", "        mavenCentral()\n        jcenter()", 1)
+            write_text(android_gradle, updated)
+            print("[rrremote] Added mavenCentral() to flutter/android/build.gradle.")
+
+    # 7. iOS display & bundle name
+    ios_plist = root / "flutter" / "ios" / "Runner" / "Info.plist"
+    if ios_plist.exists():
+        txt = read_text(ios_plist)
+        updated = txt.replace(
+            "<key>CFBundleDisplayName</key>\n\t<string>RustDesk</string>",
+            f"<key>CFBundleDisplayName</key>\n\t<string>{display_name}</string>",
+        ).replace(
+            "<key>CFBundleName</key>\n\t<string>RustDesk</string>",
+            f"<key>CFBundleName</key>\n\t<string>{display_name}</string>",
+        )
+        if updated != txt:
+            write_text(ios_plist, updated)
+            print(f"[rrremote] Updated iOS Info.plist display name to {display_name}.")
+
 
 def main() -> int:
     root = Path(sys.argv[1]).resolve() if len(sys.argv) > 1 else Path.cwd()
     display_name = os.environ.get("APP_DISPLAY_NAME", "RRRemote").strip()
     update_repo = os.environ.get("UPDATE_REPO", "melotusme/RRRemote").strip()
-    build_tag = os.environ.get("RR_BUILD_TAG", "v1.5.3-rr3").strip()
+    build_tag = os.environ.get("RR_BUILD_TAG", "v1.5.3-rr4").strip()
     rendezvous = os.environ.get("RR_RENDEZVOUS_SERVER", "").strip()
     pub_key = os.environ.get("RR_PUB_KEY", "").strip()
     api_server = os.environ.get("RR_API_SERVER", "").strip()

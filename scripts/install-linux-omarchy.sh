@@ -174,6 +174,11 @@ if systemctl list-unit-files | grep -q "^rustdesk\.service"; then
   sudo systemctl enable --now rustdesk.service
 fi
 
+# Allow direct LAN/ZeroTier connections (TCP 21118) if ufw is active
+if command -v ufw >/dev/null 2>&1 && systemctl is-active --quiet ufw 2>/dev/null; then
+  sudo ufw allow 21118/tcp >/dev/null 2>&1 || true
+fi
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 if [[ -n "${SERVER}" && -n "${KEY}" ]]; then
   ARGS=(--server "${SERVER}" --key "${KEY}")
