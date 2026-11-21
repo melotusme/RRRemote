@@ -1939,11 +1939,1206 @@ async fn test_nat_type_() -> ResultType<bool> {"""
         write_text(lan_rs, ltxt)
 
 
+RR_MACOS_PERMISSION_SWIFT = r'''
+// MARK: - RRRemote Snug-Style Floating Permission Helper & Stale-TCC Self-Healing
+
+enum RrPermissionPane: String, CaseIterable {
+    case screen = "screen"
+    case accessibility = "accessibility"
+    case input = "input"
+
+    var tccService: String {
+        switch self {
+        case .screen:
+            return "ScreenCapture"
+        case .accessibility:
+            return "Accessibility"
+        case .input:
+            return "ListenEvent"
+        }
+    }
+
+    var settingsURL: URL {
+        switch self {
+        case .screen:
+            return URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture")!
+        case .accessibility:
+            return URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")!
+        case .input:
+            return URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ListenEvent")!
+        }
+    }
+
+    func settingsTitle(isZh: Bool) -> String {
+        let isTahoeOrLater = ProcessInfo.processInfo.operatingSystemVersion.majorVersion >= 26
+        switch self {
+        case .screen:
+            return isZh ? "录屏与系统录音" : "Screen & System Audio Recording"
+        case .accessibility:
+            if isTahoeOrLater {
+                return isZh ? "设备控制和数据访问" : "Device Control & Data Access"
+            }
+            return isZh ? "辅助功能" : "Accessibility"
+        case .input:
+            return isZh ? "输入监控" : "Input Monitoring"
+        }
+    }
+
+    func stepLabel(index: Int, isZh: Bool, granted: Bool) -> String {
+        let isTahoeOrLater = ProcessInfo.processInfo.operatingSystemVersion.majorVersion >= 26
+        let badge = granted ? "✓" : "\(index)"
+        switch self {
+        case .screen:
+            return isZh ? "\(badge) 屏幕录制" : "\(badge) Screen"
+        case .accessibility:
+            if isTahoeOrLater {
+                return isZh ? "\(badge) 设备控制" : "\(badge) Device Control"
+            }
+            return isZh ? "\(badge) 辅助功能" : "\(badge) Accessibility"
+        case .input:
+            return isZh ? "\(badge) 输入监控" : "\(badge) Input"
+        }
+    }
+}
+
+final class RrNonActivatingButton: NSButton {
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool {
+        return true
+    }
+}
+
+final class RrAppPasteboardWriter: NSObject, NSPasteboardWriting {
+    private let appURL: URL
+
+    init(url: URL) {
+        self.appURL = url.standardizedFileURL
+        super.init()
+    }
+
+    func writableTypes(for pasteboard: NSPasteboard) -> [NSPasteboard.PasteboardType] {
+        return [
+            .fileURL,
+            .URL,
+            NSPasteboard.PasteboardType("NSFilenamesPboardType"),
+            NSPasteboard.PasteboardType("com.apple.pasteboard.promised-file-url"),
+            .string
+        ]
+    }
+
+    func pasteboardPropertyList(forType type: NSPasteboard.PasteboardType) -> Any? {
+        switch type {
+        case .fileURL, .URL, NSPasteboard.PasteboardType("com.apple.pasteboard.promised-file-url"):
+            return appURL.absoluteString
+        case NSPasteboard.PasteboardType("NSFilenamesPboardType"):
+            return [appURL.path]
+        case .string:
+            return appURL.path
+        default:
+            return nil
+        }
+    }
+}
+
+final class RrAppDragSourceView: NSView, NSDraggingSource {
+    private var appURL: URL
+    private let iconView = NSImageView()
+    private let nameLabel = NSTextField(labelWithString: "RRRemote.app")
+    private let subLabel = NSTextField(labelWithString: "")
+    private let hintBadge = NSTextField(labelWithString: "")
+    private let hintContainer = NSView()
+    private var mouseDownPoint: NSPoint?
+    private var isDraggingNow = false
+
+    var onDragStateChange: ((Bool) -> Void)?
+
+    init(appURL: URL, isZh: Bool) {
+        self.appURL = appURL
+        super.init(frame: .zero)
+        wantsLayer = true
+        layer?.cornerRadius = 12
+        layer?.masksToBounds = true
+        layer?.backgroundColor = NSColor.white.withAlphaComponent(0.09).cgColor
+        layer?.borderWidth = 1
+        layer?.borderColor = NSColor.white.withAlphaComponent(0.20).cgColor
+
+        iconView.translatesAutoresizingMaskIntoConstraints = false
+        iconView.imageScaling = .scaleProportionallyUpOrDown
+        addSubview(iconView)
+
+        nameLabel.font = NSFont.systemFont(ofSize: 14, weight: .semibold)
+        nameLabel.textColor = NSColor.white
+        nameLabel.lineBreakMode = .byTruncatingTail
+
+        subLabel.font = NSFont.systemFont(ofSize: 11, weight: .regular)
+        subLabel.textColor = NSColor.white.withAlphaComponent(0.68)
+        subLabel.lineBreakMode = .byTruncatingMiddle
+
+        let textStack = NSStackView(views: [nameLabel, subLabel])
+        textStack.orientation = .vertical
+        textStack.alignment = .leading
+        textStack.spacing = 2
+        textStack.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(textStack)
+
+        hintContainer.wantsLayer = true
+        hintContainer.layer?.cornerRadius = 8
+        hintContainer.layer?.backgroundColor = NSColor.systemBlue.withAlphaComponent(0.32).cgColor
+        hintContainer.layer?.borderWidth = 1
+        hintContainer.layer?.borderColor = NSColor.systemBlue.withAlphaComponent(0.55).cgColor
+        hintContainer.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(hintContainer)
+
+        hintBadge.font = NSFont.systemFont(ofSize: 12, weight: .medium)
+        hintBadge.textColor = NSColor.white
+        hintBadge.translatesAutoresizingMaskIntoConstraints = false
+        hintContainer.addSubview(hintBadge)
+
+        NSLayoutConstraint.activate([
+            iconView.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 10),
+            iconView.centerYAnchor.constraint(equalTo: centerYAnchor),
+            iconView.widthAnchor.constraint(equalToConstant: 40),
+            iconView.heightAnchor.constraint(equalToConstant: 40),
+
+            textStack.leadingAnchor.constraint(equalTo: iconView.trailingAnchor, constant: 10),
+            textStack.centerYAnchor.constraint(equalTo: centerYAnchor),
+            textStack.trailingAnchor.constraint(lessThanOrEqualTo: hintContainer.leadingAnchor, constant: -8),
+
+            hintContainer.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -10),
+            hintContainer.centerYAnchor.constraint(equalTo: centerYAnchor),
+
+            hintBadge.leadingAnchor.constraint(equalTo: hintContainer.leadingAnchor, constant: 10),
+            hintBadge.trailingAnchor.constraint(equalTo: hintContainer.trailingAnchor, constant: -10),
+            hintBadge.topAnchor.constraint(equalTo: hintContainer.topAnchor, constant: 5),
+            hintBadge.bottomAnchor.constraint(equalTo: hintContainer.bottomAnchor, constant: -5)
+        ])
+
+        refresh(appURL: appURL, isZh: isZh)
+    }
+
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    func refresh(appURL: URL, isZh: Bool) {
+        self.appURL = appURL
+        let icon = NSWorkspace.shared.icon(forFile: appURL.path)
+        icon.size = NSSize(width: 40, height: 40)
+        iconView.image = icon
+        let bundleName = appURL.lastPathComponent.isEmpty ? "RRRemote.app" : appURL.lastPathComponent
+        nameLabel.stringValue = bundleName
+        subLabel.stringValue = isZh
+            ? "按住此卡片直接拖入上方系统设置列表"
+            : "Hold & drag this card into the System Settings list above"
+        hintBadge.stringValue = isZh ? "🤚 拖到上方列表" : "🤚 Drag to list"
+    }
+
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool {
+        return true
+    }
+
+    override var mouseDownCanMoveWindow: Bool {
+        return false
+    }
+
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        return bounds.contains(point) ? self : nil
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        mouseDownPoint = convert(event.locationInWindow, from: nil)
+        isDraggingNow = false
+        layer?.backgroundColor = NSColor.white.withAlphaComponent(0.15).cgColor
+    }
+
+    override func mouseDragged(with event: NSEvent) {
+        guard !isDraggingNow, let start = mouseDownPoint else { return }
+        let current = convert(event.locationInWindow, from: nil)
+        let distance = hypot(current.x - start.x, current.y - start.y)
+        guard distance > 3 else { return }
+
+        isDraggingNow = true
+        let writer = RrAppPasteboardWriter(url: appURL)
+        let draggingItem = NSDraggingItem(pasteboardWriter: writer)
+        let dragIcon = NSWorkspace.shared.icon(forFile: appURL.path)
+        dragIcon.size = NSSize(width: 52, height: 52)
+        let dragFrame = NSRect(x: current.x - 26, y: current.y - 26, width: 52, height: 52)
+        draggingItem.setDraggingFrame(dragFrame, contents: dragIcon)
+
+        let session = beginDraggingSession(with: [draggingItem], event: event, source: self)
+        session.animatesToStartingPositionsOnCancelOrFail = true
+        session.draggingFormation = .none
+    }
+
+    override func mouseUp(with event: NSEvent) {
+        mouseDownPoint = nil
+        isDraggingNow = false
+        layer?.backgroundColor = NSColor.white.withAlphaComponent(0.09).cgColor
+    }
+
+    func draggingSession(_ session: NSDraggingSession, sourceOperationMaskFor context: NSDraggingContext) -> NSDragOperation {
+        return .copy
+    }
+
+    func ignoreModifierKeys(for session: NSDraggingSession) -> Bool {
+        return true
+    }
+
+    func draggingSession(_ session: NSDraggingSession, willBeginAt screenPoint: NSPoint) {
+        onDragStateChange?(true)
+    }
+
+    func draggingSession(_ session: NSDraggingSession, endedAt screenPoint: NSPoint, operation: NSDragOperation) {
+        onDragStateChange?(false)
+        mouseDownPoint = nil
+        isDraggingNow = false
+        layer?.backgroundColor = NSColor.white.withAlphaComponent(0.09).cgColor
+    }
+}
+
+final class RrFloatingDropPanel: NSPanel {
+    private weak var guideController: RrPermissionGuideController?
+    private let effectView = NSVisualEffectView()
+    private let titleLabel = NSTextField(wrappingLabelWithString: "")
+    private let resetButton = RrNonActivatingButton(title: "", target: nil, action: nil)
+    private let finderButton = RrNonActivatingButton(title: "Finder", target: nil, action: nil)
+    private let closeButton = RrNonActivatingButton(title: "✕", target: nil, action: nil)
+    private var stepButtons: [RrPermissionPane: RrNonActivatingButton] = [:]
+    private let dragCardView: RrAppDragSourceView
+    private let restartButton = RrNonActivatingButton(title: "", target: nil, action: nil)
+
+    private let baseHeight: CGFloat = 166
+    private let expandedRestartHeight: CGFloat = 208
+    private var currentPanelWidth: CGFloat = 480
+
+    init(controller: RrPermissionGuideController, appURL: URL, isZh: Bool) {
+        self.guideController = controller
+        self.dragCardView = RrAppDragSourceView(appURL: appURL, isZh: isZh)
+        super.init(
+            contentRect: NSRect(x: 0, y: 0, width: 480, height: 166),
+            styleMask: [.borderless, .nonactivatingPanel],
+            backing: .buffered,
+            defer: false
+        )
+
+        level = .floating
+        collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+        hidesOnDeactivate = false
+        isReleasedWhenClosed = false
+        isOpaque = false
+        backgroundColor = .clear
+        hasShadow = true
+        isMovableByWindowBackground = false
+
+        effectView.appearance = NSAppearance(named: .darkAqua)
+        effectView.material = .hudWindow
+        effectView.blendingMode = .behindWindow
+        effectView.state = .active
+        effectView.wantsLayer = true
+        effectView.layer?.cornerRadius = 16
+        effectView.layer?.masksToBounds = true
+        effectView.layer?.borderWidth = 1
+        effectView.layer?.borderColor = NSColor.white.withAlphaComponent(0.18).cgColor
+        contentView = effectView
+
+        setupUI(isZh: isZh)
+
+        dragCardView.onDragStateChange = { [weak self] dragging in
+            self?.setDraggingPassthrough(dragging)
+            if !dragging {
+                self?.guideController?.schedulePostDropPoll()
+            }
+        }
+    }
+
+    override var canBecomeKey: Bool {
+        return false
+    }
+
+    override var canBecomeMain: Bool {
+        return false
+    }
+
+    override func sendEvent(_ event: NSEvent) {
+        if event.type == .leftMouseDown || event.type == .rightMouseDown {
+            guideController?.keepSystemSettingsVisible()
+        }
+        super.sendEvent(event)
+    }
+
+    private func styleHeaderButton(_ btn: RrNonActivatingButton, title: String, bgAlpha: CGFloat = 0.12) {
+        btn.isBordered = false
+        btn.wantsLayer = true
+        btn.layer?.cornerRadius = 6
+        btn.layer?.backgroundColor = NSColor.white.withAlphaComponent(bgAlpha).cgColor
+        btn.layer?.borderWidth = 1
+        btn.layer?.borderColor = NSColor.white.withAlphaComponent(0.16).cgColor
+        let attr = NSAttributedString(
+            string: title,
+            attributes: [
+                .font: NSFont.systemFont(ofSize: 11, weight: .medium),
+                .foregroundColor: NSColor.white.withAlphaComponent(0.92)
+            ]
+        )
+        btn.attributedTitle = attr
+    }
+
+    private func setupUI(isZh: Bool) {
+        titleLabel.font = NSFont.systemFont(ofSize: 12, weight: .semibold)
+        titleLabel.textColor = NSColor.white
+        titleLabel.maximumNumberOfLines = 2
+        titleLabel.cell?.truncatesLastVisibleLine = true
+        titleLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+
+        resetButton.target = self
+        resetButton.action = #selector(onTapResetItem)
+        finderButton.target = self
+        finderButton.action = #selector(onTapFinder)
+        closeButton.target = self
+        closeButton.action = #selector(onTapClose)
+
+        styleHeaderButton(resetButton, title: isZh ? "↻ 重置此项" : "↻ Reset")
+        styleHeaderButton(finderButton, title: "Finder")
+        styleHeaderButton(closeButton, title: "✕", bgAlpha: 0.10)
+
+        NSLayoutConstraint.activate([
+            resetButton.heightAnchor.constraint(equalToConstant: 24),
+            resetButton.widthAnchor.constraint(greaterThanOrEqualToConstant: isZh ? 74 : 64),
+            finderButton.heightAnchor.constraint(equalToConstant: 24),
+            finderButton.widthAnchor.constraint(greaterThanOrEqualToConstant: 52),
+            closeButton.heightAnchor.constraint(equalToConstant: 24),
+            closeButton.widthAnchor.constraint(equalToConstant: 26)
+        ])
+
+        let actionsStack = NSStackView(views: [resetButton, finderButton, closeButton])
+        actionsStack.orientation = .horizontal
+        actionsStack.spacing = 5
+        actionsStack.alignment = .centerY
+        actionsStack.setContentCompressionResistancePriority(.required, for: .horizontal)
+        actionsStack.setContentHuggingPriority(.required, for: .horizontal)
+
+        let headerRow = NSStackView(views: [titleLabel, actionsStack])
+        headerRow.orientation = .horizontal
+        headerRow.alignment = .top
+        headerRow.spacing = 8
+
+        var pillViews: [NSView] = []
+        for (idx, pane) in RrPermissionPane.allCases.enumerated() {
+            let pill = RrNonActivatingButton(title: "", target: self, action: #selector(onTapStepPill(_:)))
+            pill.tag = idx
+            pill.isBordered = false
+            pill.wantsLayer = true
+            pill.layer?.cornerRadius = 7
+            pill.layer?.borderWidth = 1
+            pill.translatesAutoresizingMaskIntoConstraints = false
+            pill.heightAnchor.constraint(equalToConstant: 26).isActive = true
+            stepButtons[pane] = pill
+            pillViews.append(pill)
+        }
+
+        let pillsRow = NSStackView(views: pillViews)
+        pillsRow.orientation = .horizontal
+        pillsRow.distribution = .fillEqually
+        pillsRow.spacing = 6
+
+        dragCardView.translatesAutoresizingMaskIntoConstraints = false
+        dragCardView.heightAnchor.constraint(equalToConstant: 56).isActive = true
+
+        restartButton.target = self
+        restartButton.action = #selector(onTapRestart)
+        restartButton.isBordered = false
+        restartButton.wantsLayer = true
+        restartButton.layer?.cornerRadius = 8
+        restartButton.layer?.backgroundColor = NSColor.systemGreen.withAlphaComponent(0.88).cgColor
+        restartButton.translatesAutoresizingMaskIntoConstraints = false
+        restartButton.heightAnchor.constraint(equalToConstant: 34).isActive = true
+        restartButton.isHidden = true
+
+        let mainStack = NSStackView(views: [headerRow, pillsRow, dragCardView, restartButton])
+        mainStack.orientation = .vertical
+        mainStack.alignment = .width
+        mainStack.spacing = 8
+        mainStack.translatesAutoresizingMaskIntoConstraints = false
+        effectView.addSubview(mainStack)
+
+        NSLayoutConstraint.activate([
+            mainStack.leadingAnchor.constraint(equalTo: effectView.leadingAnchor, constant: 12),
+            mainStack.trailingAnchor.constraint(equalTo: effectView.trailingAnchor, constant: -12),
+            mainStack.topAnchor.constraint(equalTo: effectView.topAnchor, constant: 10),
+            mainStack.bottomAnchor.constraint(lessThanOrEqualTo: effectView.bottomAnchor, constant: -10)
+        ])
+    }
+
+    func updateContent(
+        activePane: RrPermissionPane,
+        grants: [RrPermissionPane: Bool],
+        showRestartCTA: Bool,
+        appURL: URL,
+        isZh: Bool
+    ) {
+        let paneTitle = activePane.settingsTitle(isZh: isZh)
+        if isZh {
+            titleLabel.stringValue = "↑ 将 RRRemote.app 拖到上方列表中以允许「\(paneTitle)」（如已在列表中直接打开开关）"
+        } else {
+            titleLabel.stringValue = "↑ Drag RRRemote.app into the list above to allow \"\(paneTitle)\" (or toggle ON if listed)"
+        }
+
+        styleHeaderButton(resetButton, title: isZh ? "↻ 重置此项" : "↻ Reset")
+        dragCardView.refresh(appURL: appURL, isZh: isZh)
+
+        let pStyle = NSMutableParagraphStyle()
+        pStyle.alignment = .center
+
+        for (idx, pane) in RrPermissionPane.allCases.enumerated() {
+            guard let pill = stepButtons[pane] else { continue }
+            let granted = grants[pane] ?? false
+            let isCurrent = (pane == activePane)
+            let label = pane.stepLabel(index: idx + 1, isZh: isZh, granted: granted)
+
+            let fgColor: NSColor
+            if granted {
+                pill.layer?.backgroundColor = NSColor.systemGreen.withAlphaComponent(isCurrent ? 0.30 : 0.20).cgColor
+                pill.layer?.borderColor = NSColor.systemGreen.withAlphaComponent(0.70).cgColor
+                fgColor = NSColor.white
+            } else if isCurrent {
+                pill.layer?.backgroundColor = NSColor.systemBlue.withAlphaComponent(0.32).cgColor
+                pill.layer?.borderColor = NSColor.systemBlue.withAlphaComponent(0.80).cgColor
+                fgColor = NSColor.white
+            } else {
+                pill.layer?.backgroundColor = NSColor.white.withAlphaComponent(0.07).cgColor
+                pill.layer?.borderColor = NSColor.white.withAlphaComponent(0.16).cgColor
+                fgColor = NSColor.white.withAlphaComponent(0.75)
+            }
+
+            pill.attributedTitle = NSAttributedString(
+                string: label,
+                attributes: [
+                    .font: NSFont.systemFont(ofSize: 11.5, weight: isCurrent ? .semibold : .medium),
+                    .foregroundColor: fgColor,
+                    .paragraphStyle: pStyle
+                ]
+            )
+        }
+
+        let restartChanged = (restartButton.isHidden == showRestartCTA)
+        restartButton.isHidden = !showRestartCTA
+        let restartText = isZh
+            ? "✓ 权限已开启 — 点击立即重启 RRRemote 生效"
+            : "✓ Permissions enabled — Click to restart RRRemote now"
+        restartButton.attributedTitle = NSAttributedString(
+            string: restartText,
+            attributes: [
+                .font: NSFont.systemFont(ofSize: 12.5, weight: .semibold),
+                .foregroundColor: NSColor.white,
+                .paragraphStyle: pStyle
+            ]
+        )
+
+        if restartChanged {
+            let desiredHeight = desiredPanelHeight
+            var f = frame
+            f.origin.y -= (desiredHeight - f.height)
+            f.size.height = desiredHeight
+            setFrame(f, display: true)
+        }
+        effectView.layoutSubtreeIfNeeded()
+    }
+
+    var desiredPanelHeight: CGFloat {
+        return restartButton.isHidden ? baseHeight : expandedRestartHeight
+    }
+
+    func setDraggingPassthrough(_ isDragging: Bool) {
+        ignoresMouseEvents = isDragging
+        alphaValue = isDragging ? 0.72 : 1.0
+        if !isDragging {
+            orderFrontRegardless()
+        }
+    }
+
+    func placeWaitingOnMainScreen() {
+        let visible = NSScreen.main?.visibleFrame ?? NSRect(x: 100, y: 100, width: 1280, height: 800)
+        let width = min(480, max(360, visible.width - 24))
+        let height = desiredPanelHeight
+        currentPanelWidth = width
+        let x = visible.midX - (width * 0.5)
+        let y = max(visible.minY + 28, visible.minY + (visible.height * 0.14))
+        setFrame(NSRect(x: x, y: y, width: width, height: height), display: true)
+        effectView.layoutSubtreeIfNeeded()
+        orderFrontRegardless()
+    }
+
+    func snap(to settingsFrame: CGRect) {
+        let screenVisible = NSScreen.screens
+            .first(where: { $0.frame.intersects(settingsFrame) })?
+            .visibleFrame
+            ?? NSScreen.main?.visibleFrame
+            ?? settingsFrame
+
+        let sidebarOffset: CGFloat = 220
+        let rawWidth = max(420, settingsFrame.width - sidebarOffset)
+        let width = min(rawWidth, max(360, screenVisible.width - 16))
+        let height = desiredPanelHeight
+        currentPanelWidth = width
+
+        var x = settingsFrame.minX + sidebarOffset
+        var y = settingsFrame.minY - height + 8
+
+        let minX = screenVisible.minX + 8
+        let maxX = max(minX, screenVisible.maxX - width - 8)
+        let minY = screenVisible.minY + 8
+        let maxY = max(minY, screenVisible.maxY - height - 8)
+        x = min(max(x, minX), maxX)
+        y = min(max(y, minY), maxY)
+
+        let target = NSRect(x: x, y: y, width: width, height: height)
+        if abs(frame.origin.x - target.origin.x) > 0.5
+            || abs(frame.origin.y - target.origin.y) > 0.5
+            || abs(frame.width - target.width) > 0.5
+            || abs(frame.height - target.height) > 0.5
+        {
+            setFrame(target, display: true)
+            effectView.layoutSubtreeIfNeeded()
+        }
+        if !ignoresMouseEvents {
+            orderFrontRegardless()
+        }
+    }
+
+    @objc private func onTapStepPill(_ sender: NSButton) {
+        let all = RrPermissionPane.allCases
+        guard sender.tag >= 0 && sender.tag < all.count else { return }
+        guideController?.selectPaneFromPill(all[sender.tag])
+    }
+
+    @objc private func onTapResetItem() {
+        guideController?.resetCurrentPaneAndReopen()
+    }
+
+    @objc private func onTapFinder() {
+        guard let url = guideController?.resolvedAppBundleURL() else { return }
+        NSWorkspace.shared.activateFileViewerSelecting([url])
+    }
+
+    @objc private func onTapClose() {
+        guideController?.closeGuidePanel()
+    }
+
+    @objc private func onTapRestart() {
+        guideController?.relaunchApplication()
+    }
+}
+
+final class RrPermissionGuideController {
+    static let shared = RrPermissionGuideController()
+
+    private let settingsBundleId = "com.apple.systempreferences"
+    private var panel: RrFloatingDropPanel?
+    private var windowTrackTimer: Timer?
+    private var permissionPollTimer: Timer?
+    private var activePane: RrPermissionPane = .accessibility
+    private var openedPanesInSession = Set<RrPermissionPane>()
+    private var lastKnownGrants: [RrPermissionPane: Bool] = [:]
+    private var sessionNewlyGrantedScreenOrInput = false
+    private var hasSeenSettingsWindow = false
+    private var consecutiveWindowMisses = 0
+    private var trackingStartedAt: TimeInterval = 0
+    private var startupHealTriggered = false
+    private let startupLock = NSLock()
+
+    private init() {}
+
+    var isZhLocale: Bool {
+        return Locale.preferredLanguages.first?.lowercased().hasPrefix("zh") == true
+    }
+
+    var currentBundleId: String {
+        if let bid = Bundle.main.bundleIdentifier, !bid.isEmpty {
+            return bid
+        }
+        return "com.carriez.rrremote"
+    }
+
+    func resolvedAppBundleURL() -> URL {
+        let mainURL = Bundle.main.bundleURL
+        let installedURL = URL(fileURLWithPath: "/Applications/RRRemote.app")
+        if mainURL.path.hasPrefix("/Volumes/") && FileManager.default.fileExists(atPath: installedURL.path) {
+            return installedURL
+        }
+        if mainURL.pathExtension.lowercased() == "app" {
+            return mainURL
+        }
+        if FileManager.default.fileExists(atPath: installedURL.path) {
+            return installedURL
+        }
+        return mainURL
+    }
+
+    func canScreenRecording() -> Bool {
+        if #available(macOS 10.15, *) {
+            return CGPreflightScreenCaptureAccess()
+        }
+        return true
+    }
+
+    func canAccessibility() -> Bool {
+        return AXIsProcessTrusted()
+    }
+
+    func canInputMonitoring() -> Bool {
+        if #available(macOS 10.15, *) {
+            return IOHIDCheckAccess(kIOHIDRequestTypeListenEvent) == kIOHIDAccessTypeGranted
+        }
+        return true
+    }
+
+    func isGranted(_ pane: RrPermissionPane) -> Bool {
+        switch pane {
+        case .screen:
+            return canScreenRecording()
+        case .accessibility:
+            return canAccessibility()
+        case .input:
+            return canInputMonitoring()
+        }
+    }
+
+    func currentGrantsSnapshot() -> [RrPermissionPane: Bool] {
+        return [
+            .screen: canScreenRecording(),
+            .accessibility: canAccessibility(),
+            .input: canInputMonitoring()
+        ]
+    }
+
+    func firstMissingPane() -> RrPermissionPane? {
+        for pane in RrPermissionPane.allCases {
+            if !isGranted(pane) {
+                return pane
+            }
+        }
+        return nil
+    }
+
+    func resolvePane(_ raw: String) -> RrPermissionPane {
+        switch raw.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+        case "screen":
+            return .screen
+        case "accessibility":
+            return .accessibility
+        case "input":
+            return .input
+        default:
+            return firstMissingPane() ?? .accessibility
+        }
+    }
+
+    // MARK: - Startup Stale-TCC csreq Self-Healing
+
+    func healStaleTccOnStartup() {
+        startupLock.lock()
+        if startupHealTriggered {
+            startupLock.unlock()
+            return
+        }
+        startupHealTriggered = true
+        startupLock.unlock()
+
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            self?.performStartupTccHeal()
+        }
+    }
+
+    private func performStartupTccHeal() {
+        let fm = FileManager.default
+        let supportDir = fm.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/Application Support/RRRemote", isDirectory: true)
+        try? fm.createDirectory(at: supportDir, withIntermediateDirectories: true)
+
+        // 1. Clean legacy com.carriez.rustdesk TCC once
+        let legacyMarker = supportDir.appendingPathComponent("legacy_rustdesk_tcc_cleaned")
+        if !fm.fileExists(atPath: legacyMarker.path) {
+            _ = runProcess(executable: "/usr/bin/tccutil", arguments: ["reset", "All", "com.carriez.rustdesk"])
+            try? "1\n".write(to: legacyMarker, atomically: true, encoding: .utf8)
+        }
+
+        // 2. Compute current bundle signature fingerprint (designated requirement + CDHash)
+        let bundlePath = Bundle.main.bundleURL.path
+        let currentSig = computeSignatureFingerprint(bundlePath: bundlePath)
+        guard !currentSig.isEmpty else { return }
+
+        let sigFile = supportDir.appendingPathComponent("macos_tcc_sig.txt")
+        let savedSig = (try? String(contentsOf: sigFile, encoding: .utf8))?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+
+        // 3. If signature changed, reset ONLY currently-ungranted TCC services so stale csreq rows
+        //    never block System Settings switches while already-valid grants remain untouched.
+        if savedSig != currentSig {
+            for pane in RrPermissionPane.allCases {
+                if !isGranted(pane) {
+                    _ = runTccReset(service: pane.tccService)
+                }
+            }
+            try? (currentSig + "\n").write(to: sigFile, atomically: true, encoding: .utf8)
+        }
+    }
+
+    private func computeSignatureFingerprint(bundlePath: String) -> String {
+        let output = runProcess(executable: "/usr/bin/codesign", arguments: ["-dvvv", "-r-", bundlePath]).output
+        var matchedLines: [String] = []
+        for rawLine in output.components(separatedBy: .newlines) {
+            let trimmed = rawLine.trimmingCharacters(in: .whitespacesAndNewlines)
+            if trimmed.hasPrefix("designated =>")
+                || trimmed.hasPrefix("# designated =>")
+                || trimmed.hasPrefix("CDHash=")
+            {
+                matchedLines.append(trimmed)
+            }
+        }
+        return matchedLines.joined(separator: "\n")
+    }
+
+    @discardableResult
+    private func runTccReset(service: String) -> Bool {
+        let res = runProcess(executable: "/usr/bin/tccutil", arguments: ["reset", service, currentBundleId])
+        return res.exitCode == 0
+    }
+
+    private func runProcess(executable: String, arguments: [String]) -> (exitCode: Int32, output: String) {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: executable)
+        process.arguments = arguments
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        process.standardError = pipe
+        process.standardInput = FileHandle.nullDevice
+        do {
+            try process.run()
+            let data = pipe.fileHandleForReading.readDataToEndOfFile()
+            process.waitUntilExit()
+            let text = String(data: data, encoding: .utf8) ?? ""
+            return (process.terminationStatus, text)
+        } catch {
+            return (-1, "")
+        }
+    }
+
+    // MARK: - MethodChannel Actions
+
+    func openPermissionGuide(paneRaw: String, resetFirst: Bool) {
+        let pane = resolvePane(paneRaw)
+        let currentlyGranted = isGranted(pane)
+
+        // Anti-stuck-toggle guard: if explicitly requested OR user re-opened the same still-missing pane
+        // in this session (indicating a stale TCC row rejected System Settings toggle), wipe that service's stale csreq first.
+        if !currentlyGranted && (resetFirst || openedPanesInSession.contains(pane)) {
+            _ = runTccReset(service: pane.tccService)
+        }
+
+        if !currentlyGranted {
+            openedPanesInSession.insert(pane)
+            triggerNativePromptIfNeeded(for: pane)
+        }
+
+        activePane = pane
+        lastKnownGrants = currentGrantsSnapshot()
+        openSystemSettings(for: pane)
+        presentOrRefreshPanel()
+        startTrackingTimers()
+    }
+
+    func selectPaneFromPill(_ pane: RrPermissionPane) {
+        activePane = pane
+        if !isGranted(pane) {
+            if openedPanesInSession.contains(pane) {
+                _ = runTccReset(service: pane.tccService)
+            }
+            openedPanesInSession.insert(pane)
+            triggerNativePromptIfNeeded(for: pane)
+        }
+        openSystemSettings(for: pane)
+        refreshPanelUI()
+    }
+
+    func resetCurrentPaneAndReopen() {
+        let pane = activePane
+        if !isGranted(pane) {
+            _ = runTccReset(service: pane.tccService)
+            triggerNativePromptIfNeeded(for: pane)
+        }
+        openSystemSettings(for: pane)
+        refreshPanelUI()
+    }
+
+    func resetMissingPermissions(paneRaw: String) -> Bool {
+        let normalized = paneRaw.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        let targets: [RrPermissionPane]
+        switch normalized {
+        case "screen":
+            targets = [.screen]
+        case "accessibility":
+            targets = [.accessibility]
+        case "input":
+            targets = [.input]
+        default:
+            targets = RrPermissionPane.allCases
+        }
+
+        for pane in targets {
+            if !isGranted(pane) {
+                _ = runTccReset(service: pane.tccService)
+            }
+        }
+        DispatchQueue.main.async { [weak self] in
+            self?.refreshPanelUI()
+        }
+        return true
+    }
+
+    func relaunchApplication() {
+        closeGuidePanel()
+        let appPath = resolvedAppBundleURL().path
+        let proc = Process()
+        proc.executableURL = URL(fileURLWithPath: "/bin/sh")
+        proc.arguments = ["-c", "sleep 0.5; open -a \"$1\"", "--", appPath]
+        proc.standardInput = FileHandle.nullDevice
+        proc.standardOutput = FileHandle.nullDevice
+        proc.standardError = FileHandle.nullDevice
+        try? proc.run()
+        NSApplication.shared.terminate(nil)
+    }
+
+    private func triggerNativePromptIfNeeded(for pane: RrPermissionPane) {
+        guard !isGranted(pane) else { return }
+        switch pane {
+        case .screen:
+            if #available(macOS 10.15, *) {
+                _ = CGRequestScreenCaptureAccess()
+            }
+        case .accessibility:
+            let options = ["AXTrustedCheckOptionPrompt": true] as CFDictionary
+            _ = AXIsProcessTrustedWithOptions(options)
+        case .input:
+            if #available(macOS 10.15, *) {
+                _ = IOHIDRequestAccess(kIOHIDRequestTypeListenEvent)
+            }
+        }
+    }
+
+    private func openSystemSettings(for pane: RrPermissionPane) {
+        let wasRunning = !NSRunningApplication.runningApplications(withBundleIdentifier: settingsBundleId).isEmpty
+        let url = pane.settingsURL
+        _ = NSWorkspace.shared.open(url)
+        keepSystemSettingsVisible()
+        if !wasRunning {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { [weak self] in
+                _ = NSWorkspace.shared.open(url)
+                self?.keepSystemSettingsVisible()
+            }
+        }
+    }
+
+    func keepSystemSettingsVisible() {
+        NSRunningApplication.runningApplications(withBundleIdentifier: settingsBundleId)
+            .first(where: { $0.activationPolicy != .prohibited })?
+            .activate(options: [.activateIgnoringOtherApps])
+    }
+
+    // MARK: - Floating Panel Lifecycle & 30fps Window Tracking
+
+    private func presentOrRefreshPanel() {
+        let isZh = isZhLocale
+        let appURL = resolvedAppBundleURL()
+        if panel == nil {
+            panel = RrFloatingDropPanel(controller: self, appURL: appURL, isZh: isZh)
+        }
+        refreshPanelUI()
+        if let settingsFrame = currentSystemSettingsFrame() {
+            hasSeenSettingsWindow = true
+            consecutiveWindowMisses = 0
+            panel?.snap(to: settingsFrame)
+        } else if panel?.isVisible != true {
+            panel?.placeWaitingOnMainScreen()
+        }
+    }
+
+    private func refreshPanelUI() {
+        guard let panel = panel else { return }
+        let grants = currentGrantsSnapshot()
+        let allGranted = RrPermissionPane.allCases.allSatisfy { grants[$0] == true }
+        let showRestart = sessionNewlyGrantedScreenOrInput || allGranted
+        panel.updateContent(
+            activePane: activePane,
+            grants: grants,
+            showRestartCTA: showRestart,
+            appURL: resolvedAppBundleURL(),
+            isZh: isZhLocale
+        )
+    }
+
+    func closeGuidePanel() {
+        stopTrackingTimers()
+        panel?.orderOut(nil)
+        panel?.close()
+        panel = nil
+    }
+
+    private func startTrackingTimers() {
+        stopTrackingTimers()
+        hasSeenSettingsWindow = false
+        consecutiveWindowMisses = 0
+        trackingStartedAt = Date().timeIntervalSinceReferenceDate
+
+        let trackTimer = Timer(timeInterval: 1.0 / 30.0, repeats: true) { [weak self] _ in
+            self?.tickWindowTracking()
+        }
+        trackTimer.tolerance = 0.008
+        RunLoop.main.add(trackTimer, forMode: .common)
+        windowTrackTimer = trackTimer
+
+        let pollTimer = Timer(timeInterval: 0.5, repeats: true) { [weak self] _ in
+            self?.tickPermissionPoll()
+        }
+        pollTimer.tolerance = 0.1
+        RunLoop.main.add(pollTimer, forMode: .common)
+        permissionPollTimer = pollTimer
+    }
+
+    private func stopTrackingTimers() {
+        windowTrackTimer?.invalidate()
+        windowTrackTimer = nil
+        permissionPollTimer?.invalidate()
+        permissionPollTimer = nil
+    }
+
+    func schedulePostDropPoll() {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { [weak self] in
+            self?.tickPermissionPoll()
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.85) { [weak self] in
+            self?.tickPermissionPoll()
+        }
+    }
+
+    private func tickWindowTracking() {
+        guard let panel = panel else {
+            stopTrackingTimers()
+            return
+        }
+
+        if let settingsFrame = currentSystemSettingsFrame() {
+            hasSeenSettingsWindow = true
+            consecutiveWindowMisses = 0
+            panel.snap(to: settingsFrame)
+            return
+        }
+
+        let settingsApps = NSRunningApplication.runningApplications(withBundleIdentifier: settingsBundleId)
+            .filter { !$0.isTerminated && $0.activationPolicy != .prohibited }
+        let elapsed = Date().timeIntervalSinceReferenceDate - trackingStartedAt
+
+        if settingsApps.isEmpty && (hasSeenSettingsWindow || elapsed > 4.0) {
+            consecutiveWindowMisses += 1
+            if consecutiveWindowMisses >= 12 {
+                closeGuidePanel()
+            }
+        } else if hasSeenSettingsWindow && settingsApps.isEmpty {
+            consecutiveWindowMisses += 1
+            if consecutiveWindowMisses >= 12 {
+                closeGuidePanel()
+            }
+        }
+    }
+
+    private func tickPermissionPoll() {
+        guard panel != nil else { return }
+        let nowGrants = currentGrantsSnapshot()
+        let prevScreen = lastKnownGrants[.screen] ?? false
+        let prevInput = lastKnownGrants[.input] ?? false
+        let prevActive = lastKnownGrants[activePane] ?? false
+
+        if (!prevScreen && nowGrants[.screen] == true) || (!prevInput && nowGrants[.input] == true) {
+            sessionNewlyGrantedScreenOrInput = true
+        }
+
+        lastKnownGrants = nowGrants
+
+        if !prevActive && nowGrants[activePane] == true {
+            if let nextMissing = firstMissingPane() {
+                activePane = nextMissing
+                if !openedPanesInSession.contains(nextMissing) {
+                    openedPanesInSession.insert(nextMissing)
+                    triggerNativePromptIfNeeded(for: nextMissing)
+                }
+                openSystemSettings(for: nextMissing)
+            }
+        }
+
+        refreshPanelUI()
+    }
+
+    private func currentSystemSettingsFrame() -> CGRect? {
+        guard let settingsApp = NSRunningApplication.runningApplications(withBundleIdentifier: settingsBundleId)
+            .first(where: { !$0.isTerminated && $0.activationPolicy != .prohibited })
+        else {
+            return nil
+        }
+
+        let targetPID = settingsApp.processIdentifier
+        guard let windowList = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] else {
+            return nil
+        }
+
+        var bestRect: CGRect?
+        var bestArea: CGFloat = 0
+
+        for entry in windowList {
+            guard let ownerPID = entry[kCGWindowOwnerPID as String] as? pid_t, ownerPID == targetPID else {
+                continue
+            }
+            let layer = (entry[kCGWindowLayer as String] as? Int) ?? 0
+            let alpha = (entry[kCGWindowAlpha as String] as? Double) ?? 1.0
+            guard layer == 0 && alpha > 0 else { continue }
+            guard let boundsDict = entry[kCGWindowBounds as String] as? NSDictionary,
+                  let cgRect = CGRect(dictionaryRepresentation: boundsDict)
+            else {
+                continue
+            }
+            let appKitRect = convertCGTopLeftToAppKit(cgRect)
+            guard appKitRect.width > 320 && appKitRect.height > 240 else { continue }
+            let area = appKitRect.width * appKitRect.height
+            if area > bestArea {
+                bestArea = area
+                bestRect = appKitRect
+            }
+        }
+
+        return bestRect
+    }
+
+    private func convertCGTopLeftToAppKit(_ cgRect: CGRect) -> CGRect {
+        let screenPairs = NSScreen.screens.compactMap { screen -> (frame: CGRect, cgBounds: CGRect)? in
+            guard let num = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber else {
+                return nil
+            }
+            let displayID = CGDirectDisplayID(num.uint32Value)
+            return (frame: screen.frame, cgBounds: CGDisplayBounds(displayID))
+        }
+
+        let matched = screenPairs
+            .filter { $0.cgBounds.intersects(cgRect) }
+            .max { lhs, rhs in
+                let la = lhs.cgBounds.intersection(cgRect)
+                let ra = rhs.cgBounds.intersection(cgRect)
+                return (la.width * la.height) < (ra.width * ra.height)
+            }
+            ?? screenPairs.first
+
+        guard let targetScreen = matched else {
+            return cgRect
+        }
+
+        let localX = cgRect.minX - targetScreen.cgBounds.minX
+        let localY = cgRect.minY - targetScreen.cgBounds.minY
+        return CGRect(
+            x: targetScreen.frame.minX + localX,
+            y: targetScreen.frame.maxY - localY - cgRect.height,
+            width: cgRect.width,
+            height: cgRect.height
+        )
+    }
+}
+'''
+
+
+def patch_macos_permission_flow(root: Path) -> None:
+    """Inject Snug-style floating drag-to-authorize helper & startup stale-TCC csreq self-healing into MainFlutterWindow.swift."""
+    swift_file = root / "flutter" / "macos" / "Runner" / "MainFlutterWindow.swift"
+    if not swift_file.exists():
+        raise FileNotFoundError(f"Expected {swift_file}")
+
+    txt = read_text(swift_file)
+    changed = False
+
+    # 1. Pure AppKit + CoreGraphics + ApplicationServices + IOKit.hid imports (10.14+ & 12.3+ compatible)
+    old_imports = "import Cocoa\nimport AVFoundation"
+    new_imports = "import Cocoa\nimport AVFoundation\nimport ApplicationServices\nimport IOKit.hid"
+    if "import ApplicationServices" in txt and "import IOKit.hid" in txt:
+        print("[rrremote] macOS permission helper imports already present in MainFlutterWindow.swift.")
+    elif old_imports in txt:
+        txt = txt.replace(old_imports, new_imports, 1)
+        changed = True
+    else:
+        raise RuntimeError("Failed to locate import header in flutter/macos/Runner/MainFlutterWindow.swift")
+
+    # 2. Startup stale-TCC csreq self-healing hook in awakeFromNib()
+    old_awake = "        rustdesk_core_main();\n"
+    new_awake = "        rustdesk_core_main();\n        RrPermissionGuideController.shared.healStaleTccOnStartup()\n"
+    if "RrPermissionGuideController.shared.healStaleTccOnStartup()" in txt:
+        print("[rrremote] Startup stale-TCC self-healing hook already present in MainFlutterWindow.awakeFromNib().")
+    elif old_awake in txt:
+        txt = txt.replace(old_awake, new_awake, 1)
+        changed = True
+    else:
+        raise RuntimeError("Failed to locate rustdesk_core_main() in MainFlutterWindow.awakeFromNib()")
+
+    # 3. Extend MethodChannel("org.rustdesk.rustdesk/host") with openMacPermissionGuide, resetMacPermission, relaunchApp
+    old_default_case = (
+        "                default:\n"
+        "                    result(FlutterMethodNotImplemented)\n"
+        "                }"
+    )
+    new_method_cases = (
+        '                case "openMacPermissionGuide":\n'
+        "                    let argMap = call.arguments as? [String: Any]\n"
+        '                    let paneRaw = (argMap?["pane"] as? String) ?? (call.arguments as? String) ?? "auto"\n'
+        '                    let resetFirst = (argMap?["resetFirst"] as? Bool) ?? false\n'
+        "                    DispatchQueue.main.async {\n"
+        "                        RrPermissionGuideController.shared.openPermissionGuide(paneRaw: paneRaw, resetFirst: resetFirst)\n"
+        "                        result(true)\n"
+        "                    }\n\n"
+        '                case "resetMacPermission":\n'
+        "                    let argMap = call.arguments as? [String: Any]\n"
+        '                    let paneRaw = (argMap?["pane"] as? String) ?? (call.arguments as? String) ?? "all_missing"\n'
+        "                    DispatchQueue.global(qos: .userInitiated).async {\n"
+        "                        let ok = RrPermissionGuideController.shared.resetMissingPermissions(paneRaw: paneRaw)\n"
+        "                        DispatchQueue.main.async {\n"
+        "                            result(ok)\n"
+        "                        }\n"
+        "                    }\n\n"
+        '                case "relaunchApp":\n'
+        "                    DispatchQueue.main.async {\n"
+        "                        result(true)\n"
+        "                        RrPermissionGuideController.shared.relaunchApplication()\n"
+        "                    }\n\n"
+        "                default:\n"
+        "                    result(FlutterMethodNotImplemented)\n"
+        "                }"
+    )
+    if 'case "openMacPermissionGuide":' in txt:
+        print("[rrremote] MethodChannel macOS permission handlers already present in MainFlutterWindow.swift.")
+    elif old_default_case in txt:
+        txt = txt.replace(old_default_case, new_method_cases, 1)
+        changed = True
+    else:
+        raise RuntimeError("Failed to locate FlutterMethodNotImplemented default case in MainFlutterWindow.swift")
+
+    # 4. Append RrPermissionGuideController, RrFloatingDropPanel, RrAppDragSourceView, RrAppPasteboardWriter
+    if "final class RrPermissionGuideController" in txt:
+        print("[rrremote] RrPermissionGuideController classes already appended to MainFlutterWindow.swift.")
+    else:
+        txt = txt.rstrip() + "\n" + RR_MACOS_PERMISSION_SWIFT.lstrip("\n")
+        changed = True
+
+    if changed:
+        write_text(swift_file, txt)
+        print("[rrremote] Patched flutter/macos/Runner/MainFlutterWindow.swift with Snug-style floating drag helper & TCC self-healing.")
+
+
 def main() -> int:
     root = Path(sys.argv[1]).resolve() if len(sys.argv) > 1 else Path.cwd()
     display_name = os.environ.get("APP_DISPLAY_NAME", "RRRemote").strip()
     update_repo = os.environ.get("UPDATE_REPO", "melotusme/RRRemote").strip()
-    build_tag = os.environ.get("RR_BUILD_TAG", "v1.5.3-rr9").strip()
+    build_tag = os.environ.get("RR_BUILD_TAG", "v1.5.3-rr10").strip()
     rendezvous = os.environ.get("RR_RENDEZVOUS_SERVER", "").strip()
     pub_key = os.environ.get("RR_PUB_KEY", "").strip()
     api_server = os.environ.get("RR_API_SERVER", "").strip()
@@ -1958,6 +3153,7 @@ def main() -> int:
     patch_hbb_common_config(root, display_name, update_repo, rendezvous, pub_key, api_server)
     patch_macos_video_reliability(root)
     patch_macos_input_reliability(root)
+    patch_macos_permission_flow(root)
     patch_update_checker(root, update_repo, build_tag)
     patch_updater_artifact_resolver(root, update_repo)
     patch_default_api_server_fallback(root, api_server)
