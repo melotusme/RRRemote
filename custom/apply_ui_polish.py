@@ -1,13 +1,16 @@
 #!/usr/bin/env python3
 """
-Apply RRRemote industrial-grade UI & multi-platform UX polish to upstream
-RustDesk 1.5.3 Flutter sources.
+Apply RRRemote personal-edition UI & layout refactor to upstream RustDesk 1.5.3
+Flutter sources across Desktop and Mobile.
 
 Design principles:
-- Compatible with both Flutter 3.24.5 (Win/Linux/Android/iOS/macOS-x64) and
-  Flutter 3.44.9 (macOS-arm64).
+- Single-user personal remote control UX (Linear / UU Remote inspired):
+  zero-password clutter removed, quick-connect bar streamlined, Favorites
+  default tab with clean labeled pills, decluttered personal Settings & Mobile UI.
+- 100% compatible with both Flutter 3.24.5 (Win/Linux/Android/iOS/macOS-x64) and
+  Flutter 3.44.9 (Win-arm64/macOS-arm64, including apply_flutter_3.44_source_patches.sh).
 - Zero hardcoded personal servers/keys/IPs.
-- Idempotent and strictly verified: every critical patch reports hit/skip clearly.
+- Idempotent and strictly verified: every patch reports applied/already-applied clearly.
 """
 
 from __future__ import annotations
@@ -27,6 +30,8 @@ def write_text(path: Path, content: str) -> None:
 
 
 def replace_exact(content: str, old: str, new: str, label: str, required: bool = True) -> str:
+    if not new:
+        raise ValueError(f"replace_exact requires non-empty replacement for idempotency: {label}")
     if new in content:
         print(f"[rrremote-ui] already applied: {label}")
         return content
@@ -43,7 +48,6 @@ def replace_exact(content: str, old: str, new: str, label: str, required: bool =
 def ensure_import(content: str, import_line: str) -> str:
     if import_line in content:
         return content
-    # Insert after first import line
     m = re.search(r"^import\s+['\"][^'\"]+['\"][^;]*;\s*$", content, flags=re.MULTILINE)
     if not m:
         return import_line + "\n" + content
@@ -51,7 +55,7 @@ def ensure_import(content: str, import_line: str) -> str:
     return content[:idx] + "\n" + import_line + content[idx:]
 
 
-def patch_common_theme(root: Path) -> None:
+def patch_common_theme(root: Path, update_repo: str) -> None:
     p = root / "flutter" / "lib" / "common.dart"
     txt = read_text(p)
 
@@ -161,7 +165,7 @@ def patch_common_theme(root: Path) -> None:
         "MyTheme brand & neutral color tokens",
     )
 
-    # 4. Harmonize ListTile & Checkbox radii to 8px / 6px
+    # 4. Harmonize ListTile radius to 8px
     txt = replace_exact(
         txt,
         """  static const ListTileThemeData listTileTheme = ListTileThemeData(
@@ -181,7 +185,9 @@ def patch_common_theme(root: Path) -> None:
         "ListTile radius 8px",
     )
 
-    # 5. Polish Light Theme (crisp borders, 14px dialogs, 10px inputs, 8px buttons)
+    # 5. Polish Light Theme (NOTE: keep `dialogTheme: DialogTheme(` and avoid literal
+    # `backgroundColor: Colors.white,` so `.github/patches/apply_flutter_3.44_source_patches.sh`
+    # passes `is_unpatched_state` and `is_complete_patch_state` cleanly!)
     txt = replace_exact(
         txt,
         """    hoverColor: Color.fromARGB(255, 224, 224, 224),
@@ -260,7 +266,8 @@ def patch_common_theme(root: Path) -> None:
         "LightTheme ColorScheme",
     )
 
-    # 6. Polish Dark Theme (Obsidian Slate surfaces, refined borders, 14px dialogs, 10px inputs)
+    # 6. Polish Dark Theme (Obsidian Slate surfaces; preserve `dialogTheme: DialogTheme(`
+    # and `scrollbarTheme: scrollbarThemeDark,` anchors for Flutter 3.44 patch script)
     txt = replace_exact(
         txt,
         """    hoverColor: Color.fromARGB(255, 45, 46, 53),
@@ -430,7 +437,7 @@ def patch_common_theme(root: Path) -> None:
         "Curated industrial str2color device card palette",
     )
 
-    # 8. Brand header logo in left host pane (RRRemote icon + wordmark)
+    # 8. Brand header logo in left host pane & mobile settings (RRRemote icon + wordmark)
     txt = replace_exact(
         txt,
         """class _Logo extends StatefulWidget {
@@ -486,9 +493,9 @@ class _LogoState extends State<_Logo> {
   Widget build(BuildContext context) {
     final textColor = Theme.of(context).textTheme.titleLarge?.color;
     return Padding(
-      padding: const EdgeInsets.fromLTRB(18, 16, 14, 4),
+      padding: const EdgeInsets.fromLTRB(16, 16, 14, 4),
       child: Row(
-        mainAxisSize: MainAxisSize.max,
+        mainAxisSize: MainAxisSize.min,
         crossAxisAlignment: CrossAxisAlignment.center,
         children: [
           ClipRRect(
@@ -499,10 +506,27 @@ class _LogoState extends State<_Logo> {
           Text(
             'RRRemote',
             style: TextStyle(
-              fontSize: 17,
+              fontSize: 16.5,
               fontWeight: FontWeight.w700,
-              letterSpacing: 0.3,
+              letterSpacing: 0.25,
               color: textColor,
+            ),
+          ),
+          const SizedBox(width: 7),
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+            decoration: BoxDecoration(
+              color: MyTheme.accent.withOpacity(0.14),
+              borderRadius: BorderRadius.circular(5),
+            ),
+            child: const Text(
+              'PERSONAL',
+              style: TextStyle(
+                fontSize: 9,
+                fontWeight: FontWeight.w700,
+                letterSpacing: 0.6,
+                color: MyTheme.idColor,
+              ),
             ),
           ),
         ],
@@ -510,9 +534,11 @@ class _LogoState extends State<_Logo> {
     );
   }
 }""",
-        "RRRemote branded left-pane header logo",
+        "RRRemote Personal branded header logo",
     )
 
+    repo_url = f"https://github.com/{update_repo}"
+    txt = txt.replace("Uri.parse('https://rustdesk.com')", f"Uri.parse('{repo_url}')")
     write_text(p, txt)
 
 
@@ -521,18 +547,83 @@ def patch_desktop_home_page(root: Path, update_repo: str) -> None:
     txt = read_text(p)
     txt = ensure_import(txt, "import 'dart:ui' show FontFeature;")
 
-    # 1. Slightly wider, more breathable left host panel (200 -> 228)
+    # 1. Remove stranger-oriented tip & One-time Password section from left sidebar
+    txt = replace_exact(
+        txt,
+        """      Align(
+        alignment: Alignment.center,
+        child: loadLogo(),
+      ),
+      buildTip(context),
+      if (!isOutgoingOnly) buildIDBoard(context),
+      if (!isOutgoingOnly) buildPasswordBoard(context),""",
+        """      Align(
+        alignment: Alignment.centerLeft,
+        child: loadLogo(),
+      ),
+      if (!isOutgoingOnly) buildIDBoard(context),""",
+        "Remove tip and One-time Password board from Desktop left host pane",
+    )
+
+    # 2. Clean 232px width for left host sidebar
     txt = replace_exact(
         txt,
         "width: isIncomingOnly ? 280.0 : 200.0,",
-        "width: isIncomingOnly ? 288.0 : 228.0,",
-        "Widen left host pane to 228px",
+        "width: isIncomingOnly ? 288.0 : 232.0,",
+        "Set left host pane width to 232px",
     )
 
-    # 2. Tabular numerals + explicit one-click Copy ID button in buildIDBoard
+    # 3. Refactor buildIDBoard & buildPopupMenu into a clean 'This Desk ID' surface card
+    #    with one-click Copy + subtle self-hosted Ready status + Server shortcut
     txt = replace_exact(
         txt,
-        """                      child: TextFormField(
+        """  buildIDBoard(BuildContext context) {
+    final model = gFFI.serverModel;
+    return Container(
+      margin: const EdgeInsets.only(left: 20, right: 11),
+      height: 57,
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.baseline,
+        textBaseline: TextBaseline.alphabetic,
+        children: [
+          Container(
+            width: 2,
+            decoration: const BoxDecoration(color: MyTheme.accent),
+          ).marginOnly(top: 5),
+          Expanded(
+            child: Padding(
+              padding: const EdgeInsets.only(left: 7),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Container(
+                    height: 25,
+                    child: Row(
+                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          translate("ID"),
+                          style: TextStyle(
+                              fontSize: 14,
+                              color: Theme.of(context)
+                                  .textTheme
+                                  .titleLarge
+                                  ?.color
+                                  ?.withOpacity(0.5)),
+                        ).marginOnly(top: 5),
+                        buildPopupMenu(context)
+                      ],
+                    ),
+                  ),
+                  Flexible(
+                    child: GestureDetector(
+                      onDoubleTap: () {
+                        Clipboard.setData(
+                            ClipboardData(text: model.serverId.text));
+                        showToast(translate("Copied"));
+                      },
+                      child: TextFormField(
                         controller: model.serverId,
                         readOnly: true,
                         decoration: InputDecoration(
@@ -542,79 +633,229 @@ def patch_desktop_home_page(root: Path, update_repo: str) -> None:
                         style: TextStyle(
                           fontSize: 22,
                         ),
-                      ).workaroundFreezeLinuxMint(),""",
-        """                      child: Row(
-                        children: [
-                          Expanded(
-                            child: TextFormField(
-                              controller: model.serverId,
-                              readOnly: true,
-                              decoration: InputDecoration(
-                                border: InputBorder.none,
-                                enabledBorder: InputBorder.none,
-                                focusedBorder: InputBorder.none,
-                                filled: false,
-                                contentPadding: EdgeInsets.only(top: 10, bottom: 10),
-                              ),
-                              style: TextStyle(
-                                fontSize: 21,
-                                fontWeight: FontWeight.w600,
-                                letterSpacing: 0.6,
-                                fontFeatures: const [FontFeature.tabularFigures()],
-                              ),
-                            ).workaroundFreezeLinuxMint(),
-                          ),
-                          Tooltip(
-                            message: translate("Copy"),
-                            child: InkWell(
-                              borderRadius: BorderRadius.circular(6),
-                              onTap: () {
-                                Clipboard.setData(
-                                    ClipboardData(text: model.serverId.text));
-                                showToast(translate("Copied"));
-                              },
-                              child: Padding(
-                                padding: const EdgeInsets.all(6),
-                                child: Icon(
-                                  Icons.copy_rounded,
-                                  size: 16,
-                                  color: Theme.of(context)
-                                      .textTheme
-                                      .titleLarge
-                                      ?.color
-                                      ?.withOpacity(0.65),
-                                ),
-                              ),
-                            ),
-                          ),
-                        ],
-                      ),""",
-        "One-click Copy ID button & tabular numerals",
-    )
+                      ).workaroundFreezeLinuxMint(),
+                    ),
+                  )
+                ],
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
 
-    # 3. Clean password field borderless + tabular numerals
-    txt = replace_exact(
-        txt,
-        """                            decoration: InputDecoration(
-                              border: InputBorder.none,
-                              contentPadding:
-                                  EdgeInsets.only(top: 14, bottom: 10),
-                            ),
-                            style: TextStyle(fontSize: 15),""",
-        """                            decoration: InputDecoration(
-                              border: InputBorder.none,
-                              enabledBorder: InputBorder.none,
-                              focusedBorder: InputBorder.none,
-                              filled: false,
-                              contentPadding:
-                                  EdgeInsets.only(top: 14, bottom: 10),
-                            ),
-                            style: TextStyle(
-                              fontSize: 15,
-                              fontWeight: FontWeight.w500,
-                              fontFeatures: const [FontFeature.tabularFigures()],
-                            ),""",
-        "Tabular numerals for host password",
+  Widget buildPopupMenu(BuildContext context) {
+    final textColor = Theme.of(context).textTheme.titleLarge?.color;
+    RxBool hover = false.obs;
+    return InkWell(
+      onTap: DesktopTabPage.onAddSetting,
+      child: Tooltip(
+        message: translate('Settings'),
+        child: Obx(
+          () => CircleAvatar(
+            radius: 15,
+            backgroundColor: hover.value
+                ? Theme.of(context).scaffoldBackgroundColor
+                : Theme.of(context).colorScheme.background,
+            child: Icon(
+              Icons.more_vert_outlined,
+              size: 20,
+              color: hover.value ? textColor : textColor?.withOpacity(0.5),
+            ),
+          ),
+        ),
+      ),
+      onHover: (value) => hover.value = value,
+    );
+  }""",
+        """  buildIDBoard(BuildContext context) {
+    final model = gFFI.serverModel;
+    final textColor = Theme.of(context).textTheme.titleLarge?.color;
+    final borderColor = MyTheme.color(context).border ?? Colors.black12;
+    return Container(
+      margin: const EdgeInsets.fromLTRB(14, 12, 14, 6),
+      padding: const EdgeInsets.fromLTRB(14, 10, 10, 10),
+      decoration: BoxDecoration(
+        color: Theme.of(context).scaffoldBackgroundColor,
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: borderColor, width: 1),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            crossAxisAlignment: CrossAxisAlignment.center,
+            children: [
+              Text(
+                translate("ID"),
+                style: TextStyle(
+                  fontSize: 11.5,
+                  fontWeight: FontWeight.w600,
+                  letterSpacing: 0.4,
+                  color: textColor?.withOpacity(0.55),
+                ),
+              ),
+              buildPopupMenu(context),
+            ],
+          ),
+          const SizedBox(height: 2),
+          Row(
+            crossAxisAlignment: CrossAxisAlignment.center,
+            children: [
+              Expanded(
+                child: GestureDetector(
+                  onDoubleTap: () {
+                    Clipboard.setData(
+                        ClipboardData(text: model.serverId.text));
+                    showToast(translate("Copied"));
+                  },
+                  child: TextFormField(
+                    controller: model.serverId,
+                    readOnly: true,
+                    decoration: const InputDecoration(
+                      border: InputBorder.none,
+                      enabledBorder: InputBorder.none,
+                      focusedBorder: InputBorder.none,
+                      filled: false,
+                      isDense: true,
+                      contentPadding: EdgeInsets.symmetric(vertical: 6),
+                    ),
+                    style: const TextStyle(
+                      fontSize: 19.5,
+                      fontWeight: FontWeight.w700,
+                      letterSpacing: 0.5,
+                      fontFeatures: [FontFeature.tabularFigures()],
+                    ),
+                  ).workaroundFreezeLinuxMint(),
+                ),
+              ),
+              Tooltip(
+                message: translate("Copy"),
+                child: InkWell(
+                  borderRadius: BorderRadius.circular(7),
+                  onTap: () {
+                    Clipboard.setData(
+                        ClipboardData(text: model.serverId.text));
+                    showToast(translate("Copied"));
+                  },
+                  child: Container(
+                    padding:
+                        const EdgeInsets.symmetric(horizontal: 7, vertical: 5),
+                    decoration: BoxDecoration(
+                      color: MyTheme.accent.withOpacity(0.10),
+                      borderRadius: BorderRadius.circular(7),
+                    ),
+                    child: const Icon(
+                      Icons.copy_rounded,
+                      size: 14,
+                      color: MyTheme.idColor,
+                    ),
+                  ),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 6),
+          Divider(height: 1, thickness: 0.8, color: borderColor),
+          const SizedBox(height: 8),
+          Obx(() {
+            final stopped = svcStopped.value;
+            final status = stateGlobal.svcStatus.value;
+            final isReady = !stopped && status == SvcStatus.ready;
+            final dotColor = stopped || status == SvcStatus.connecting
+                ? const Color(0xFFF59E0B)
+                : (isReady
+                    ? const Color(0xFF22C55E)
+                    : const Color(0xFFEF4444));
+            final statusLabel = stopped
+                ? translate("Service is not running")
+                : status == SvcStatus.connecting
+                    ? translate("connecting_status")
+                    : isReady
+                        ? translate("Ready")
+                        : translate("not_ready_status");
+            return Row(
+              crossAxisAlignment: CrossAxisAlignment.center,
+              children: [
+                Container(
+                  width: 7,
+                  height: 7,
+                  decoration: BoxDecoration(
+                    shape: BoxShape.circle,
+                    color: dotColor,
+                    boxShadow: [
+                      BoxShadow(
+                        color: dotColor.withOpacity(0.35),
+                        blurRadius: 5,
+                        spreadRadius: 0.5,
+                      ),
+                    ],
+                  ),
+                ),
+                const SizedBox(width: 7),
+                Expanded(
+                  child: Text(
+                    statusLabel,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(
+                      fontSize: 11.5,
+                      fontWeight: FontWeight.w500,
+                      color: textColor?.withOpacity(0.72),
+                    ),
+                  ),
+                ),
+                if (!bind.isDisableSettings())
+                  Tooltip(
+                    message: translate('ID/Relay Server'),
+                    child: InkWell(
+                      borderRadius: BorderRadius.circular(5),
+                      onTap: () =>
+                          DesktopSettingPage.switch2page(SettingsTabKey.network),
+                      child: Padding(
+                        padding: const EdgeInsets.all(3),
+                        child: Icon(
+                          Icons.dns_rounded,
+                          size: 14,
+                          color: textColor?.withOpacity(0.55),
+                        ),
+                      ),
+                    ),
+                  ),
+              ],
+            );
+          }),
+        ],
+      ),
+    );
+  }
+
+  Widget buildPopupMenu(BuildContext context) {
+    final textColor = Theme.of(context).textTheme.titleLarge?.color;
+    RxBool hover = false.obs;
+    return InkWell(
+      borderRadius: BorderRadius.circular(6),
+      onTap: DesktopTabPage.onAddSetting,
+      onHover: (value) => hover.value = value,
+      child: Tooltip(
+        message: translate('Settings'),
+        child: Obx(
+          () => Padding(
+            padding: const EdgeInsets.all(4),
+            child: Icon(
+              Icons.tune_rounded,
+              size: 16,
+              color: hover.value ? textColor : textColor?.withOpacity(0.55),
+            ),
+          ),
+        ),
+      ),
+    );
+  }""",
+        "Clean This Desk ID card with one-click Copy & self-hosted Ready indicator",
     )
 
     # 4. Redirect desktop update card links to RRRemote GitHub Releases & auto-download on startup
@@ -668,7 +909,83 @@ def patch_desktop_home_page(root: Path, update_repo: str) -> None:
         "Auto-trigger in-app update download on app launch",
     )
 
-    # 5. Replace garish pink-magenta buildInstallCard with refined slate-indigo card
+    # 5. Clean macOS TCC permission action card ONLY when Screen Recording / Accessibility /
+    #    Input Monitoring is missing (remove daemon nag & external rustdesk.com doc links)
+    txt = replace_exact(
+        txt,
+        """    } else if (isMacOS) {
+      final isOutgoingOnly = bind.isOutgoingOnly();
+      if (!(isOutgoingOnly || bind.mainIsCanScreenRecording(prompt: false))) {
+        return buildInstallCard("Permissions", "config_screen", "Configure",
+            () async {
+          bind.mainIsCanScreenRecording(prompt: true);
+          // macOS shows the request prompt only once per app, so later
+          // presses would do nothing without opening the settings pane.
+          launchUrl(Uri.parse(
+              'x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture'));
+          watchIsCanScreenRecording = true;
+        }, help: 'Help', link: translate("doc_mac_permission"));
+      } else if (!isOutgoingOnly && !bind.mainIsProcessTrusted(prompt: false)) {
+        return buildInstallCard("Permissions", "config_acc", "Configure",
+            () async {
+          bind.mainIsProcessTrusted(prompt: true);
+          watchIsProcessTrust = true;
+        }, help: 'Help', link: translate("doc_mac_permission"));
+      } else if (!bind.mainIsCanInputMonitoring(prompt: false)) {
+        return buildInstallCard("Permissions", "config_input", "Configure",
+            () async {
+          bind.mainIsCanInputMonitoring(prompt: true);
+          watchIsInputMonitoring = true;
+        }, help: 'Help', link: translate("doc_mac_permission"));
+      } else if (!isOutgoingOnly &&
+          !svcStopped.value &&
+          bind.mainIsInstalled() &&
+          !bind.mainIsInstalledDaemon(prompt: false)) {
+        return buildInstallCard("", "install_daemon_tip", "Install", () async {
+          bind.mainIsInstalledDaemon(prompt: true);
+        });
+      }""",
+        """    } else if (isMacOS) {
+      final isOutgoingOnly = bind.isOutgoingOnly();
+      if (!(isOutgoingOnly || bind.mainIsCanScreenRecording(prompt: false))) {
+        return buildInstallCard("Permissions", "config_screen", "Configure",
+            () async {
+          bind.mainIsCanScreenRecording(prompt: true);
+          launchUrl(Uri.parse(
+              'x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture'));
+          watchIsCanScreenRecording = true;
+        });
+      } else if (!isOutgoingOnly && !bind.mainIsProcessTrusted(prompt: false)) {
+        return buildInstallCard("Permissions", "config_acc", "Configure",
+            () async {
+          bind.mainIsProcessTrusted(prompt: true);
+          launchUrl(Uri.parse(
+              'x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility'));
+          watchIsProcessTrust = true;
+        });
+      } else if (!bind.mainIsCanInputMonitoring(prompt: false)) {
+        return buildInstallCard("Permissions", "config_input", "Configure",
+            () async {
+          bind.mainIsCanInputMonitoring(prompt: true);
+          launchUrl(Uri.parse(
+              'x-apple.systempreferences:com.apple.preference.security?Privacy_ListenEvent'));
+          watchIsInputMonitoring = true;
+        });
+      }""",
+        "Clean macOS TCC action cards (only Screen Recording / Accessibility / Input Monitoring)",
+    )
+
+    # Remove external rustdesk.com Linux doc links in desktop_home_page.dart
+    repo_url = f"https://github.com/{update_repo}"
+    txt = txt.replace(
+        "https://rustdesk.com/docs/en/client/linux/#permissions-issue", repo_url
+    ).replace(
+        "https://rustdesk.com/docs/en/client/linux/#x11-required", repo_url
+    ).replace(
+        "https://rustdesk.com/docs/en/client/linux/#login-screen", repo_url
+    )
+
+    # 6. Replace garish pink-magenta buildInstallCard with refined slate-cobalt card
     txt = replace_exact(
         txt,
         """        Container(
@@ -687,7 +1004,7 @@ def patch_desktop_home_page(root: Path, update_repo: str) -> None:
               padding: EdgeInsets.all(20),""",
         """        Container(
           margin: EdgeInsets.fromLTRB(
-              12, marginTop, 12, bind.isIncomingOnly() ? marginTop : 0),
+              14, 10, 14, bind.isIncomingOnly() ? marginTop : 0),
           child: Container(
               decoration: BoxDecoration(
                   borderRadius: BorderRadius.circular(12),
@@ -695,16 +1012,16 @@ def patch_desktop_home_page(root: Path, update_repo: str) -> None:
                     color: Colors.white.withOpacity(0.14),
                     width: 1,
                   ),
-                  gradient: LinearGradient(
+                  gradient: const LinearGradient(
                 begin: Alignment.topLeft,
                 end: Alignment.bottomRight,
                 colors: [
+                  Color(0xFF1E293B),
                   Color(0xFF1E3A8A),
-                  Color(0xFF2563EB),
                 ],
               )),
-              padding: EdgeInsets.all(14),""",
-        "Refined slate-indigo status card (replaces pink gradient)",
+              padding: const EdgeInsets.all(14),""",
+        "Refined slate-cobalt status/permission card",
     )
 
     txt = replace_exact(
@@ -721,13 +1038,13 @@ def patch_desktop_home_page(root: Path, update_repo: str) -> None:
                                       onTap: onPressed,
                                     )""",
         """                                    FixedWidthButton(
-                                      width: 144,
+                                      width: 156,
                                       padding: 7,
                                       isOutline: true,
                                       text: translate(btnText),
                                       textColor: Colors.white,
                                       borderColor: Colors.white70,
-                                      textSize: 14,
+                                      textSize: 13.5,
                                       radius: 8,
                                       onTap: onPressed,
                                     )""",
@@ -737,15 +1054,22 @@ def patch_desktop_home_page(root: Path, update_repo: str) -> None:
     write_text(p, txt)
 
 
-def patch_desktop_connection_page(root: Path) -> None:
-    p = root / "flutter" / "lib" / "desktop" / "pages" / "connection_page.dart"
-    txt = read_text(p)
+def patch_desktop_connection_and_tabs(root: Path) -> None:
+    # 1. Desktop connection_page.dart: single-row streamlined Quick-Connect bar & status bar
+    conn_p = root / "flutter" / "lib" / "desktop" / "pages" / "connection_page.dart"
+    txt = read_text(conn_p)
     txt = ensure_import(txt, "import 'dart:ui' show FontFeature;")
     txt = ensure_import(
         txt, "import 'package:flutter_hbb/desktop/pages/desktop_setting_page.dart';"
     )
 
-    # 1. Replace rustdesk.com/pricing link with direct jump to Network / Self-Hosted Server Settings
+    txt = replace_exact(
+        txt,
+        "  double? get height => bind.isIncomingOnly() ? null : em * 3;",
+        "  double? get height => bind.isIncomingOnly() ? null : 36.0;",
+        "Compact OnlineStatusWidget height",
+    )
+
     txt = replace_exact(
         txt,
         """  void onUsePublicServerGuide() {
@@ -762,7 +1086,6 @@ def patch_desktop_connection_page(root: Path) -> None:
         "Replace pricing URL with direct Network/Server settings jump",
     )
 
-    # 2. Polish status indicator dot + add always-accessible Server Settings shortcut in status bar
     txt = replace_exact(
         txt,
         """    basicWidget() => Row(
@@ -796,8 +1119,8 @@ def patch_desktop_connection_page(root: Path) -> None:
           crossAxisAlignment: CrossAxisAlignment.center,
           children: [
             Container(
-              height: 9,
-              width: 9,
+              height: 8,
+              width: 8,
               decoration: BoxDecoration(
                 shape: BoxShape.circle,
                 color: _svcStopped.value ||
@@ -832,18 +1155,18 @@ def patch_desktop_connection_page(root: Path) -> None:
                   borderRadius: BorderRadius.circular(6),
                   onTap: () => DesktopSettingPage.switch2page(SettingsTabKey.network),
                   child: Padding(
-                    padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+                    padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
                     child: Row(
                       mainAxisSize: MainAxisSize.min,
                       children: [
                         Icon(
                           Icons.dns_rounded,
-                          size: 14,
+                          size: 13,
                           color: Theme.of(context)
                               .textTheme
                               .bodySmall
                               ?.color
-                              ?.withOpacity(0.7),
+                              ?.withOpacity(0.68),
                         ),
                         const SizedBox(width: 5),
                         Text(
@@ -854,7 +1177,7 @@ def patch_desktop_connection_page(root: Path) -> None:
                                 .textTheme
                                 .bodySmall
                                 ?.color
-                                ?.withOpacity(0.75),
+                                ?.withOpacity(0.72),
                           ),
                         ),
                       ],
@@ -867,7 +1190,26 @@ def patch_desktop_connection_page(root: Path) -> None:
         "Emerald status indicator + quick ID/Relay Server button",
     )
 
-    # 3. Polish Remote ID input container border and tabular numerals
+    # Tighten ConnectionPage vertical rhythm
+    txt = replace_exact(
+        txt,
+        """            Row(
+              children: [
+                Flexible(child: _buildRemoteIDTextField(context)),
+              ],
+            ).marginOnly(top: 22),
+            SizedBox(height: 12),
+            Divider().paddingOnly(right: 12),""",
+        """            Row(
+              children: [
+                Flexible(child: _buildRemoteIDTextField(context)),
+              ],
+            ).marginOnly(top: 16, right: 12),
+            const SizedBox(height: 12),""",
+        "Streamline ConnectionPage top spacing and remove redundant divider",
+    )
+
+    # Convert bulky 3-row Remote ID box into a sleek single-row Quick-Connect command bar
     txt = replace_exact(
         txt,
         """    var w = Container(
@@ -875,18 +1217,47 @@ def patch_desktop_connection_page(root: Path) -> None:
       padding: const EdgeInsets.fromLTRB(20, 24, 20, 22),
       decoration: BoxDecoration(
           borderRadius: const BorderRadius.all(Radius.circular(13)),
-          border: Border.all(color: Theme.of(context).colorScheme.background)),""",
+          border: Border.all(color: Theme.of(context).colorScheme.background)),
+      child: Ink(
+        child: Column(
+          children: [
+            getConnectionPageTitle(context, false).marginOnly(bottom: 15),
+            Row(
+              children: [
+                Expanded(
+                    child: RawAutocomplete<Peer>(""",
         """    var w = Container(
-      width: 360 + 20 * 2,
-      padding: const EdgeInsets.fromLTRB(20, 20, 20, 18),
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
       decoration: BoxDecoration(
-          color: Theme.of(context).colorScheme.background.withOpacity(0.55),
-          borderRadius: const BorderRadius.all(Radius.circular(12)),
-          border: Border.all(
-            color: MyTheme.color(context).border ?? Theme.of(context).colorScheme.background,
-            width: 1,
-          )),""",
-        "Refined Remote ID container surface & border",
+        color: Theme.of(context).colorScheme.background.withOpacity(0.55),
+        borderRadius: const BorderRadius.all(Radius.circular(12)),
+        border: Border.all(
+          color: MyTheme.color(context).border ??
+              Theme.of(context).colorScheme.background,
+          width: 1,
+        ),
+      ),
+      child: Ink(
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.center,
+          children: [
+            Container(
+              width: 34,
+              height: 34,
+              margin: const EdgeInsets.only(right: 10),
+              decoration: BoxDecoration(
+                color: MyTheme.accent.withOpacity(0.12),
+                borderRadius: BorderRadius.circular(8),
+              ),
+              child: const Icon(
+                Icons.bolt_rounded,
+                size: 19,
+                color: MyTheme.idColor,
+              ),
+            ),
+            Expanded(
+              child: RawAutocomplete<Peer>(""",
+        "Single-row Quick-Connect bar container & leading bolt icon",
     )
 
     txt = replace_exact(
@@ -895,28 +1266,441 @@ def patch_desktop_connection_page(root: Path) -> None:
                             fontFamily: 'WorkSans',
                             fontSize: 22,
                             height: 1.4,
-                          ),""",
+                          ),
+                          maxLines: 1,
+                          cursorColor:
+                              Theme.of(context).textTheme.titleLarge?.color,
+                          decoration: InputDecoration(
+                              filled: false,
+                              counterText: '',
+                              hintText: _idInputFocused.value
+                                  ? null
+                                  : translate('Enter Remote ID'),
+                              contentPadding: const EdgeInsets.symmetric(
+                                  horizontal: 15, vertical: 13)),""",
         """                          style: const TextStyle(
                             fontFamily: 'WorkSans',
-                            fontSize: 21,
-                            fontWeight: FontWeight.w500,
-                            letterSpacing: 0.5,
-                            height: 1.35,
+                            fontSize: 18,
+                            fontWeight: FontWeight.w600,
+                            letterSpacing: 0.4,
+                            height: 1.25,
                             fontFeatures: [FontFeature.tabularFigures()],
-                          ),""",
-        "Tabular numerals in Remote ID input",
+                          ),
+                          maxLines: 1,
+                          cursorColor:
+                              Theme.of(context).textTheme.titleLarge?.color,
+                          decoration: InputDecoration(
+                              filled: false,
+                              isDense: true,
+                              border: InputBorder.none,
+                              enabledBorder: InputBorder.none,
+                              focusedBorder: InputBorder.none,
+                              counterText: '',
+                              hintText: _idInputFocused.value
+                                  ? null
+                                  : translate('Enter Remote ID'),
+                              contentPadding: const EdgeInsets.symmetric(
+                                  horizontal: 6, vertical: 8)),""",
+        "Compact borderless tabular input inside Quick-Connect bar",
     )
 
-    write_text(p, txt)
-
-
-def patch_peer_card(root: Path) -> None:
-    p = root / "flutter" / "lib" / "common" / "widgets" / "peer_card.dart"
-    txt = read_text(p)
-
-    # 1. Refined radii & crisp 1.5px hover border
     txt = replace_exact(
         txt,
+        """                  },
+                )),
+              ],
+            ),
+            Padding(
+              padding: const EdgeInsets.only(top: 13.0),
+              child: Row(mainAxisAlignment: MainAxisAlignment.end, children: [
+                SizedBox(
+                  height: 28.0,
+                  child: ElevatedButton(
+                    onPressed: () {
+                      onConnect();
+                    },
+                    child: Text(translate("Connect")),
+                  ),
+                ),
+                const SizedBox(width: 8),
+                Container(
+                  height: 28.0,
+                  width: 28.0,
+                  decoration: BoxDecoration(
+                    border: Border.all(color: Theme.of(context).dividerColor),
+                    borderRadius: BorderRadius.circular(8),
+                  ),
+                  child: Center(
+                    child: StatefulBuilder(
+                      builder: (context, setState) {
+                        var offset = Offset(0, 0);
+                        return Obx(() => InkWell(
+                              child: _menuOpen.value
+                                  ? Transform.rotate(
+                                      angle: pi,
+                                      child: Icon(IconFont.more, size: 14),
+                                    )
+                                  : Icon(IconFont.more, size: 14),
+                              onTapDown: (e) {
+                                offset = e.globalPosition;
+                              },
+                              onTap: () async {
+                                _menuOpen.value = true;
+                                final x = offset.dx;
+                                final y = offset.dy;
+                                await mod_menu
+                                    .showMenu(
+                                  context: context,
+                                  position: RelativeRect.fromLTRB(x, y, x, y),
+                                  items: [
+                                    (
+                                      'Transfer file',
+                                      () => onConnect(isFileTransfer: true)
+                                    ),
+                                    (
+                                      'View camera',
+                                      () => onConnect(isViewCamera: true)
+                                    ),
+                                    (
+                                      '${translate('Terminal')} (beta)',
+                                      () => onConnect(isTerminal: true)
+                                    ),
+                                    // `connect` routes this through the
+                                    // desktop path only; the peer card gates
+                                    // it the same way.
+                                    if (isDesktop)
+                                      (
+                                        'TCP tunneling',
+                                        () => onConnect(isTcpTunneling: true)
+                                      ),
+                                  ]
+                                      .map<MenuEntryBase<String>>(
+                                          (e) => MenuEntryButton<String>(
+                                            childBuilder: (TextStyle? style) =>
+                                                Text(
+                                              translate(e.$1),
+                                              style: style,
+                                            ),
+                                            proc: () => e.$2(),
+                                            padding: EdgeInsets.symmetric(
+                                                horizontal:
+                                                    kDesktopMenuPadding.left),
+                                            dismissOnClicked: true,
+                                          ))
+                                      .followedBy([
+                                        MenuEntryDivider<String>(),
+                                        _requestApprovalMenu(context),
+                                      ])
+                                      .map((e) => e.build(
+                                          context,
+                                          const MenuConfig(
+                                              commonColor: CustomPopupMenuTheme
+                                                  .commonColor,
+                                              height:
+                                                  CustomPopupMenuTheme.height,
+                                              dividerHeight:
+                                                  CustomPopupMenuTheme
+                                                      .dividerHeight)))
+                                      .expand((i) => i)
+                                      .toList(),
+                                  elevation: 8,
+                                )
+                                    .then((_) {
+                                  _menuOpen.value = false;
+                                });
+                              },
+                            ));
+                      },
+                    ),
+                  ),
+                ),
+              ]),
+            ),
+          ],
+        ),
+      ),
+    );
+    return Container(
+        constraints: const BoxConstraints(maxWidth: 600), child: w);""",
+        """                  },
+                ),
+            ),
+            const SizedBox(width: 10),
+            SizedBox(
+              height: 36.0,
+              child: ElevatedButton.icon(
+                onPressed: () {
+                  onConnect();
+                },
+                style: ElevatedButton.styleFrom(
+                  padding: const EdgeInsets.symmetric(horizontal: 16),
+                  elevation: 0,
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(9),
+                  ),
+                ),
+                icon: const Icon(Icons.arrow_forward_rounded, size: 16),
+                label: Text(
+                  translate("Connect"),
+                  style: const TextStyle(
+                    fontSize: 13.5,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+              ),
+            ),
+            const SizedBox(width: 6),
+            Container(
+              height: 36.0,
+              width: 36.0,
+              decoration: BoxDecoration(
+                border: Border.all(
+                  color: MyTheme.color(context).border ??
+                      Theme.of(context).dividerColor,
+                ),
+                borderRadius: BorderRadius.circular(9),
+              ),
+              child: Center(
+                child: StatefulBuilder(
+                  builder: (context, setState) {
+                    var offset = const Offset(0, 0);
+                    return Obx(() => InkWell(
+                          borderRadius: BorderRadius.circular(9),
+                          child: _menuOpen.value
+                              ? Transform.rotate(
+                                  angle: pi,
+                                  child: const Icon(IconFont.more, size: 14),
+                                )
+                              : const Icon(IconFont.more, size: 14),
+                          onTapDown: (e) {
+                            offset = e.globalPosition;
+                          },
+                          onTap: () async {
+                            _menuOpen.value = true;
+                            final x = offset.dx;
+                            final y = offset.dy;
+                            await mod_menu
+                                .showMenu(
+                              context: context,
+                              position: RelativeRect.fromLTRB(x, y, x, y),
+                              items: [
+                                (
+                                  'Transfer file',
+                                  () => onConnect(isFileTransfer: true)
+                                ),
+                                (
+                                  'View camera',
+                                  () => onConnect(isViewCamera: true)
+                                ),
+                                (
+                                  '${translate('Terminal')} (beta)',
+                                  () => onConnect(isTerminal: true)
+                                ),
+                                if (isDesktop)
+                                  (
+                                    'TCP tunneling',
+                                    () => onConnect(isTcpTunneling: true)
+                                  ),
+                              ]
+                                  .map<MenuEntryBase<String>>(
+                                      (e) => MenuEntryButton<String>(
+                                            childBuilder: (TextStyle? style) =>
+                                                Text(
+                                              translate(e.$1),
+                                              style: style,
+                                            ),
+                                            proc: () => e.$2(),
+                                            padding: EdgeInsets.symmetric(
+                                                horizontal:
+                                                    kDesktopMenuPadding.left),
+                                            dismissOnClicked: true,
+                                          ))
+                                  .map((e) => e.build(
+                                      context,
+                                      const MenuConfig(
+                                          commonColor: CustomPopupMenuTheme
+                                              .commonColor,
+                                          height:
+                                              CustomPopupMenuTheme.height,
+                                          dividerHeight:
+                                              CustomPopupMenuTheme
+                                                  .dividerHeight)))
+                                  .expand((i) => i)
+                                  .toList(),
+                              elevation: 8,
+                            )
+                                .then((_) {
+                              _menuOpen.value = false;
+                            });
+                          },
+                        ));
+                  },
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+    return Container(
+        constraints: const BoxConstraints(maxWidth: 680), child: w);""",
+        "Inline prominent Connect button & decluttered quick-mode menu",
+    )
+
+    write_text(conn_p, txt)
+
+    # 2. peer_tab_model.dart: default tab order Favorites -> Recent -> LAN, default active tab = Favorites
+    model_p = root / "flutter" / "lib" / "models" / "peer_tab_model.dart"
+    mtxt = read_text(model_p)
+    mtxt = replace_exact(
+        mtxt,
+        """  final List<int> orders =
+      List.generate(maxTabCount, (index) => index, growable: false);""",
+        """  final List<int> orders = [1, 0, 2, 3, 4];""",
+        "Order peer tabs as Favorites, Recent, LAN by default",
+    )
+    mtxt = replace_exact(
+        mtxt,
+        """    // init currentTab
+    _currentTab =
+        int.tryParse(bind.getLocalFlutterOption(k: kOptionPeerTabIndex)) ?? 0;""",
+        """    // init currentTab (default to Favorites for personal fleet UX)
+    _currentTab =
+        int.tryParse(bind.getLocalFlutterOption(k: kOptionPeerTabIndex)) ??
+            PeerTabIndex.fav.index;""",
+        "Default active peer tab to Favorites",
+    )
+    write_text(model_p, mtxt)
+
+    # 3. peer_tab_page.dart: clean labeled pill tabs on Desktop/Landscape (icon + title)
+    tab_p = root / "flutter" / "lib" / "common" / "widgets" / "peer_tab_page.dart"
+    ttxt = read_text(tab_p)
+    ttxt = replace_exact(
+        ttxt,
+        """        Obx(() => SizedBox(
+              height: 32,""",
+        """        Obx(() => SizedBox(
+              height: 34,""",
+        "PeerTabPage switch bar height 34px",
+    )
+    ttxt = replace_exact(
+        ttxt,
+        """          final selected = model.currentTab == t;
+          final color = selected
+              ? MyTheme.tabbar(context).selectedTextColor
+              : MyTheme.tabbar(context).unSelectedTextColor
+            ?..withOpacity(0.5);
+          final hover = false.obs;
+          final deco = BoxDecoration(
+              color: Theme.of(context).colorScheme.background,
+              borderRadius: BorderRadius.circular(6));
+          final decoBorder = BoxDecoration(
+              border: Border(
+            bottom: BorderSide(width: 2, color: color!),
+          ));
+          counter += 1;
+          return ReorderableDragStartListener(
+              key: ValueKey(t),
+              index: counter,
+              child: Obx(() => Tooltip(
+                    preferBelow: false,
+                    message: model.tabTooltip(t),
+                    onTriggered: isMobile ? mobileShowTabVisibilityMenu : null,
+                    child: InkWell(
+                      child: Container(
+                        decoration: (hover.value
+                            ? (selected ? decoBorder : deco)
+                            : (selected ? decoBorder : null)),
+                        child: Icon(model.tabIcon(t), color: color)
+                            .paddingSymmetric(horizontal: 4),
+                      ).paddingSymmetric(horizontal: 4),""",
+        """          final selected = model.currentTab == t;
+          final isPortrait = stateGlobal.isPortrait.isTrue;
+          final baseColor = selected
+              ? MyTheme.accent
+              : (MyTheme.tabbar(context).unSelectedTextColor ??
+                  Theme.of(context).textTheme.bodyMedium?.color);
+          final color = selected ? baseColor : baseColor?.withOpacity(0.68);
+          final hover = false.obs;
+          final selectedDeco = BoxDecoration(
+            color: MyTheme.accent.withOpacity(0.12),
+            borderRadius: BorderRadius.circular(8),
+          );
+          final hoverDeco = BoxDecoration(
+            color: Theme.of(context).colorScheme.background,
+            borderRadius: BorderRadius.circular(8),
+          );
+          counter += 1;
+          return ReorderableDragStartListener(
+              key: ValueKey(t),
+              index: counter,
+              child: Obx(() => Tooltip(
+                    preferBelow: false,
+                    message: model.tabTooltip(t),
+                    onTriggered: isMobile ? mobileShowTabVisibilityMenu : null,
+                    child: InkWell(
+                      borderRadius: BorderRadius.circular(8),
+                      child: Container(
+                        margin: const EdgeInsets.only(right: 4),
+                        padding: EdgeInsets.symmetric(
+                            horizontal: isPortrait ? 8 : 11, vertical: 5),
+                        decoration: selected
+                            ? selectedDeco
+                            : (hover.value ? hoverDeco : null),
+                        child: isPortrait
+                            ? Icon(model.tabIcon(t), size: 18, color: color)
+                            : Row(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  Icon(model.tabIcon(t),
+                                      size: 15, color: color),
+                                  const SizedBox(width: 6),
+                                  Text(
+                                    model.tabTooltip(t),
+                                    style: TextStyle(
+                                      fontSize: 13,
+                                      fontWeight: selected
+                                          ? FontWeight.w600
+                                          : FontWeight.w500,
+                                      color: color,
+                                    ),
+                                  ),
+                                ],
+                              ),
+                      ),""",
+        "Linear-style labeled pill tabs on Desktop & compact pills on Mobile",
+    )
+    write_text(tab_p, ttxt)
+
+    # 4. peers_view.dart: calm minimal empty state icon instead of sad face
+    pv_p = root / "flutter" / "lib" / "common" / "widgets" / "peers_view.dart"
+    pvtxt = read_text(pv_p)
+    pvtxt = replace_exact(
+        pvtxt,
+        """                Icon(
+                  Icons.sentiment_very_dissatisfied_rounded,
+                  color: Theme.of(context).tabBarTheme.labelColor,
+                  size: 40,
+                ).paddingOnly(bottom: 10),""",
+        """                Icon(
+                  Icons.devices_other_rounded,
+                  color: Theme.of(context)
+                      .tabBarTheme
+                      .labelColor
+                      ?.withOpacity(0.45),
+                  size: 36,
+                ).paddingOnly(bottom: 10),""",
+        "Calm minimal devices icon for empty peer tab state",
+    )
+    write_text(pv_p, pvtxt)
+
+    # 5. peer_card.dart: clean hostname · platform subtitle, online glow, hover Connect pill,
+    #    and decluttered context menu
+    card_p = root / "flutter" / "lib" / "common" / "widgets" / "peer_card.dart"
+    ctxt = read_text(card_p)
+
+    ctxt = replace_exact(
+        ctxt,
         """  final double _cardRadius = 16;
   final double _tileRadius = 5;
   final double _borderWidth = 2;""",
@@ -927,9 +1711,8 @@ def patch_peer_card(root: Path) -> None:
         "PeerCard radii & hover state",
     )
 
-    # 2. Subtle resting border + crisp accent hover border + track hover for quick-connect pill
-    txt = replace_exact(
-        txt,
+    ctxt = replace_exact(
+        ctxt,
         """    var deco = Rx<BoxDecoration?>(
       BoxDecoration(
         border: Border.all(color: Colors.transparent, width: _borderWidth),
@@ -991,9 +1774,48 @@ def patch_peer_card(root: Path) -> None:
         "PeerCard resting border & hover tracking",
     )
 
-    # 3. Quick-connect floating pill button on desktop grid card hover (UU Remote style one-click)
-    txt = replace_exact(
-        txt,
+    # Clean hostname · platform subtitle in list/tile/portrait mode
+    ctxt = replace_exact(
+        ctxt,
+        """  makeChild(bool isPortrait, Peer peer) {
+    final name = hideUsernameOnCard == true
+        ? peer.hostname
+        : '${peer.username}${peer.username.isNotEmpty && peer.hostname.isNotEmpty ? '@' : ''}${peer.hostname}';""",
+        """  String _formatSubtitle(Peer peer) {
+    final host = peer.hostname.trim().isNotEmpty
+        ? peer.hostname.trim()
+        : peer.username.trim();
+    final plat = peer.platform.trim();
+    if (host.isNotEmpty && plat.isNotEmpty) {
+      return '$host · $plat';
+    }
+    return host.isNotEmpty ? host : plat;
+  }
+
+  makeChild(bool isPortrait, Peer peer) {
+    final name = _formatSubtitle(peer);""",
+        "Clean hostname · platform subtitle on PeerTile",
+    )
+
+    # Clean hostname · platform subtitle on desktop grid card
+    ctxt = replace_exact(
+        ctxt,
+        """  Widget _buildPeerCard(
+      BuildContext context, Peer peer, Rx<BoxDecoration?> deco) {
+    hideUsernameOnCard ??=
+        bind.mainGetBuildinOption(key: kHideUsernameOnCard) == 'Y';
+    final name = hideUsernameOnCard == true
+        ? peer.hostname
+        : '${peer.username}${peer.username.isNotEmpty && peer.hostname.isNotEmpty ? '@' : ''}${peer.hostname}';""",
+        """  Widget _buildPeerCard(
+      BuildContext context, Peer peer, Rx<BoxDecoration?> deco) {
+    final name = _formatSubtitle(peer);""",
+        "Clean hostname · platform subtitle on PeerCard grid",
+    )
+
+    # One-click hover Connect pill on desktop grid card
+    ctxt = replace_exact(
+        ctxt,
         """        if (colors.isNotEmpty)
           Positioned(
             top: 4,
@@ -1017,7 +1839,7 @@ def patch_peer_card(root: Path) -> None:
                   bottom: 44,
                   right: 10,
                   child: Material(
-                    color: MyTheme.accent.withOpacity(0.92),
+                    color: MyTheme.accent.withOpacity(0.94),
                     borderRadius: BorderRadius.circular(16),
                     elevation: 2,
                     child: InkWell(
@@ -1051,9 +1873,21 @@ def patch_peer_card(root: Path) -> None:
         "One-click hover Connect pill on desktop PeerCard",
     )
 
-    # 4. Upgrade online dot to soft-glow Emerald (online) / calm Slate (offline)
-    txt = replace_exact(
-        txt,
+    # Remove stranger-facing 'Request approval' submenu from PeerCard context menu
+    ctxt = replace_exact(
+        ctxt,
+        """    menuItems.add(MenuEntryDivider<String>());
+    menuItems.add(_requestApprovalAction(context));
+    // menuItems.add(await _openNewConnInOptAction(peer.id));""",
+        """    if (!isWeb) {
+      menuItems.add(MenuEntryDivider<String>());
+    }""",
+        "Remove stranger Request Approval submenu from PeerCard context menu",
+    )
+
+    # Soft-glow Emerald (online) / calm Slate (offline) indicator
+    ctxt = replace_exact(
+        ctxt,
         """Widget getOnline(double rightPadding, bool online) {
   return Tooltip(
       message: translate(online ? 'Online' : 'Offline'),
@@ -1064,7 +1898,7 @@ def patch_peer_card(root: Path) -> None:
               radius: 3, backgroundColor: online ? Colors.green : kColorWarn)));
 }""",
         """Widget getOnline(double rightPadding, bool online) {
-  final dotColor = online ? const Color(0xFF22C55E) : const Color(0xFF94A3B8);
+  final dotColor = online ? const Color(0xFF22C55E) : const Color(0xFF64748B);
   return Tooltip(
       message: translate(online ? 'Online' : 'Offline'),
       waitDuration: const Duration(seconds: 1),
@@ -1089,6 +1923,158 @@ def patch_peer_card(root: Path) -> None:
           )));
 }""",
         "Industrial Emerald/Slate online status indicator",
+    )
+
+    write_text(card_p, ctxt)
+
+
+def patch_desktop_settings(root: Path, update_repo: str) -> None:
+    p = root / "flutter" / "lib" / "desktop" / "pages" / "desktop_setting_page.dart"
+    txt = read_text(p)
+    repo_url = f"https://github.com/{update_repo}"
+
+    # 1. Declutter Desktop Settings sidebar tabs: hide unused Printer & Account tabs,
+    #    order cleanly as General, Display, Network, Security, About
+    txt = replace_exact(
+        txt,
+        """  static final List<SettingsTabKey> tabKeys = [
+    if (bind.mainGetBuildinOption(key: kOptionHideGeneralSetting) != 'Y')
+      SettingsTabKey.general,
+    if (!isWeb &&
+        !bind.isOutgoingOnly() &&
+        !bind.isDisableSettings() &&
+        bind.mainGetBuildinOption(key: kOptionHideSecuritySetting) != 'Y')
+      SettingsTabKey.safety,
+    if (!bind.isDisableSettings() &&
+        bind.mainGetBuildinOption(key: kOptionHideNetworkSetting) != 'Y')
+      SettingsTabKey.network,
+    if (!bind.isIncomingOnly()) SettingsTabKey.display,
+    if (!bind.isDisableAccount()) SettingsTabKey.account,
+    if (isWindows &&
+        !bind.isDisableSettings() &&
+        bind.mainGetBuildinOption(key: kOptionHideRemotePrinterSetting) != 'Y')
+      SettingsTabKey.printer,
+    SettingsTabKey.about,
+  ];""",
+        """  static final List<SettingsTabKey> tabKeys = [
+    if (bind.mainGetBuildinOption(key: kOptionHideGeneralSetting) != 'Y')
+      SettingsTabKey.general,
+    if (!bind.isIncomingOnly()) SettingsTabKey.display,
+    if (!bind.isDisableSettings() &&
+        bind.mainGetBuildinOption(key: kOptionHideNetworkSetting) != 'Y')
+      SettingsTabKey.network,
+    if (!isWeb &&
+        !bind.isOutgoingOnly() &&
+        !bind.isDisableSettings() &&
+        bind.mainGetBuildinOption(key: kOptionHideSecuritySetting) != 'Y')
+      SettingsTabKey.safety,
+    SettingsTabKey.about,
+  ];""",
+        "Declutter Desktop Settings sidebar to General, Display, Network, Security, About",
+    )
+
+    # 2. Hide stranger-facing 2FA + Telegram bot card in Security tab unless actively set
+    txt = replace_exact(
+        txt,
+        """                permissions(context),
+                password(context),
+                _Card(title: '2FA', children: [tfa()]),""",
+        """                permissions(context),
+                password(context),
+                if (bind.mainHasValid2FaSync())
+                  _Card(title: '2FA', children: [tfa()]),""",
+        "Hide unused 2FA card in Desktop Security settings",
+    )
+
+    # 3. Clean Desktop About page (remove Purslane Tech banner & rustdesk.com links)
+    txt = replace_exact(
+        txt,
+        """        child: _Card(title: translate('About RustDesk'), children: [""",
+        """        child: _Card(title: 'RRRemote', children: [""",
+        "Rename Desktop About card title to RRRemote",
+    )
+    txt = replace_exact(
+        txt,
+        """              InkWell(
+                  onTap: () {
+                    launchUrlString('https://rustdesk.com/privacy.html');
+                  },
+                  child: Text(
+                    translate('Privacy Statement'),
+                    style: linkStyle,
+                  ).marginSymmetric(vertical: 4.0)),
+              InkWell(
+                  onTap: () {
+                    launchUrlString('https://rustdesk.com');
+                  },
+                  child: Text(
+                    translate('Website'),
+                    style: linkStyle,
+                  ).marginSymmetric(vertical: 4.0)),
+              Container(
+                decoration: const BoxDecoration(color: Color(0xFF2c8cff)),
+                padding:
+                    const EdgeInsets.symmetric(vertical: 24, horizontal: 8),
+                child: SelectionArea(
+                    child: Row(
+                  children: [
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            'Copyright © ${DateTime.now().toString().substring(0, 4)} Purslane Tech Pte. Ltd.\\n$license',
+                            style: const TextStyle(color: Colors.white),
+                          ),
+                          Text(
+                            translate('Slogan_tip'),
+                            style: TextStyle(
+                                fontWeight: FontWeight.w800,
+                                color: Colors.white),
+                          )
+                        ],
+                      ),
+                    ),
+                  ],
+                )),
+              ).marginSymmetric(vertical: 4.0)""",
+        f"""              InkWell(
+                  onTap: () {{
+                    launchUrlString('{repo_url}');
+                  }},
+                  child: const Text(
+                    'GitHub Repository ({update_repo})',
+                    style: linkStyle,
+                  ).marginSymmetric(vertical: 4.0)),
+              Container(
+                margin: const EdgeInsets.only(top: 8, bottom: 4),
+                padding:
+                    const EdgeInsets.symmetric(vertical: 14, horizontal: 14),
+                decoration: BoxDecoration(
+                  color: MyTheme.accent.withOpacity(0.10),
+                  borderRadius: BorderRadius.circular(10),
+                  border: Border.all(
+                    color: MyTheme.accent.withOpacity(0.25),
+                  ),
+                ),
+                child: SelectionArea(
+                  child: Row(
+                    children: [
+                      Expanded(
+                        child: Text(
+                          'RRRemote Personal Edition · Self-Hosted Zero-Friction Remote Control\\n$license',
+                          style: TextStyle(
+                            fontSize: 12.5,
+                            height: 1.45,
+                            color: Theme.of(context).textTheme.bodyMedium?.color,
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              )""",
+        "Clean Desktop About page branding & repository link",
     )
 
     write_text(p, txt)
@@ -1139,63 +2125,23 @@ def patch_remote_toolbar(root: Path) -> None:
 
 
 def patch_mobile_ui(root: Path, update_repo: str) -> None:
-    # 1. Mobile connection_page.dart: replace pinkAccent update banner & refine ID card
-    conn_p = root / "flutter" / "lib" / "mobile" / "pages" / "connection_page.dart"
-    txt = read_text(conn_p)
+    repo_url = f"https://github.com/{update_repo}"
 
-    txt = replace_exact(
-        txt,
-        "final url = 'https://rustdesk.com/download';",
-        f"final url = 'https://github.com/{update_repo}/releases/latest';",
-        "Redirect mobile update URL to RRRemote repo",
-    )
-    txt = replace_exact(
-        txt,
-        """            child: Container(
-                alignment: AlignmentDirectional.center,
-                width: double.infinity,
-                color: Colors.pinkAccent,
-                padding: const EdgeInsets.symmetric(vertical: 12),
-                child: Text(translate('Download new version'),
-                    style: const TextStyle(
-                        color: Colors.white, fontWeight: FontWeight.bold))));""",
-        """            child: Container(
-                alignment: AlignmentDirectional.center,
-                width: double.infinity,
-                margin: const EdgeInsets.only(bottom: 8),
-                decoration: BoxDecoration(
-                  color: MyTheme.accent,
-                  borderRadius: BorderRadius.circular(10),
-                ),
-                padding: const EdgeInsets.symmetric(vertical: 11),
-                child: Text(translate('Download new version'),
-                    style: const TextStyle(
-                        color: Colors.white,
-                        fontSize: 13,
-                        fontWeight: FontWeight.w600))));""",
-        "Mobile update banner refined accent pill",
-    )
-    txt = replace_exact(
-        txt,
-        """          decoration: BoxDecoration(
-            color: Theme.of(context).cardColor,
-            borderRadius: BorderRadius.all(Radius.circular(13)),
-          ),""",
-        """          decoration: BoxDecoration(
-            color: Theme.of(context).cardColor,
-            borderRadius: const BorderRadius.all(Radius.circular(12)),
-            border: Border.all(
-              color: MyTheme.color(context).border ?? Colors.black12,
-              width: 1,
-            ),
-          ),""",
-        "Mobile Remote ID input card border & radius",
-    )
-    write_text(conn_p, txt)
-
-    # 2. Mobile home_page.dart: crisp border on BottomNavigationBar
+    # 1. Mobile home_page.dart: remove stranger Chat tab on Android & add crisp hairline divider
     home_p = root / "flutter" / "lib" / "mobile" / "pages" / "home_page.dart"
     htxt = read_text(home_p)
+    htxt = replace_exact(
+        htxt,
+        """    if (isAndroid && !bind.isOutgoingOnly()) {
+      _chatPageTabIndex = _pages.length;
+      _pages.addAll([ChatPage(type: ChatPageType.mobileMain), ServerPage()]);
+    }""",
+        """    if (isAndroid && !bind.isOutgoingOnly()) {
+      _chatPageTabIndex = -1;
+      _pages.add(ServerPage());
+    }""",
+        "Remove redundant Chat tab from Android bottom navigation",
+    )
     htxt = replace_exact(
         htxt,
         """          bottomNavigationBar: BottomNavigationBar(
@@ -1226,53 +2172,345 @@ def patch_mobile_ui(root: Path, update_repo: str) -> None:
     )
     write_text(home_p, htxt)
 
-    # 3. Replace remaining rustdesk.com links & text in Desktop & Mobile Settings and common.dart
-    repo_url = f"https://github.com/{update_repo}"
-    for rel, pairs in (
-        (
-            "flutter/lib/desktop/pages/desktop_setting_page.dart",
-            [
-                ("launchUrlString('https://rustdesk.com/privacy.html')", f"launchUrlString('{repo_url}')"),
-                ("launchUrlString('https://rustdesk.com')", f"launchUrlString('{repo_url}')"),
-            ],
-        ),
-        (
-            "flutter/lib/mobile/pages/settings_page.dart",
-            [
-                ("'https://rustdesk.com/'", f"'{repo_url}'"),
-                ("'https://rustdesk.com/privacy.html'", f"'{repo_url}'"),
-                ("Text('rustdesk.com'", "Text('RRRemote'"),
-            ],
-        ),
-        (
-            "flutter/lib/common.dart",
-            [
-                ("Uri.parse('https://rustdesk.com')", f"Uri.parse('{repo_url}')"),
-            ],
-        ),
-    ):
-        fp = root / rel
-        if fp.exists():
-            ftxt = read_text(fp)
-            orig = ftxt
-            for old_s, new_s in pairs:
-                ftxt = ftxt.replace(old_s, new_s)
-            if ftxt != orig:
-                write_text(fp, ftxt)
-                print(f"[rrremote-ui] Replaced rustdesk.com references in {rel}")
+    # 2. Mobile connection_page.dart: sleek compact Quick-Connect bar & accent Connect button
+    conn_p = root / "flutter" / "lib" / "mobile" / "pages" / "connection_page.dart"
+    ctxt = read_text(conn_p)
+    ctxt = ensure_import(ctxt, "import 'dart:ui' show FontFeature;")
+
+    ctxt = replace_exact(
+        ctxt,
+        "final url = 'https://rustdesk.com/download';",
+        f"final url = 'https://github.com/{update_repo}/releases/latest';",
+        "Redirect mobile update URL to RRRemote repo",
+    )
+    ctxt = replace_exact(
+        ctxt,
+        """            child: Container(
+                alignment: AlignmentDirectional.center,
+                width: double.infinity,
+                color: Colors.pinkAccent,
+                padding: const EdgeInsets.symmetric(vertical: 12),
+                child: Text(translate('Download new version'),
+                    style: const TextStyle(
+                        color: Colors.white, fontWeight: FontWeight.bold))));""",
+        """            child: Container(
+                alignment: AlignmentDirectional.center,
+                width: double.infinity,
+                margin: const EdgeInsets.only(bottom: 8),
+                decoration: BoxDecoration(
+                  color: MyTheme.accent,
+                  borderRadius: BorderRadius.circular(10),
+                ),
+                padding: const EdgeInsets.symmetric(vertical: 11),
+                child: Text(translate('Download new version'),
+                    style: const TextStyle(
+                        color: Colors.white,
+                        fontSize: 13,
+                        fontWeight: FontWeight.w600))));""",
+        "Mobile update banner refined accent pill",
+    )
+    ctxt = replace_exact(
+        ctxt,
+        """    final w = SizedBox(
+      height: 84,
+      child: Padding(
+        padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 2),
+        child: Ink(
+          decoration: BoxDecoration(
+            color: Theme.of(context).cardColor,
+            borderRadius: BorderRadius.all(Radius.circular(13)),
+          ),""",
+        """    final w = SizedBox(
+      height: 70,
+      child: Padding(
+        padding: const EdgeInsets.symmetric(vertical: 6, horizontal: 2),
+        child: Ink(
+          decoration: BoxDecoration(
+            color: Theme.of(context).cardColor,
+            borderRadius: const BorderRadius.all(Radius.circular(12)),
+            border: Border.all(
+              color: MyTheme.color(context).border ?? Colors.black12,
+              width: 1,
+            ),
+          ),""",
+        "Streamline Mobile Quick-Connect card height & border",
+    )
+    ctxt = replace_exact(
+        ctxt,
+        """                        style: const TextStyle(
+                          fontFamily: 'WorkSans',
+                          fontWeight: FontWeight.bold,
+                          fontSize: 30,
+                          color: MyTheme.idColor,
+                        ),""",
+        """                        style: const TextStyle(
+                          fontFamily: 'WorkSans',
+                          fontWeight: FontWeight.w700,
+                          fontSize: 22,
+                          color: MyTheme.idColor,
+                          fontFeatures: [FontFeature.tabularFigures()],
+                        ),""",
+        "Clean tabular numerals in Mobile Quick-Connect input",
+    )
+    ctxt = replace_exact(
+        ctxt,
+        """              SizedBox(
+                width: 60,
+                height: 60,
+                child: IconButton(
+                  icon: const Icon(Icons.arrow_forward,
+                      color: MyTheme.darkGray, size: 45),
+                  onPressed: onConnect,
+                ),
+              ),""",
+        """              Padding(
+                padding: const EdgeInsets.only(right: 8),
+                child: Material(
+                  color: MyTheme.accent,
+                  borderRadius: BorderRadius.circular(10),
+                  child: InkWell(
+                    borderRadius: BorderRadius.circular(10),
+                    onTap: onConnect,
+                    child: const SizedBox(
+                      width: 42,
+                      height: 42,
+                      child: Icon(
+                        Icons.arrow_forward_rounded,
+                        color: Colors.white,
+                        size: 22,
+                      ),
+                    ),
+                  ),
+                ),
+              ),""",
+        "Prominent accent Connect button on Mobile Quick-Connect bar",
+    )
+    write_text(conn_p, ctxt)
+
+    # 3. Mobile server_page.dart: remove One-time Password block, bypass 12s stranger scam dialog,
+    #    hide removed chat tab jump icon, and rebrand storage label
+    srv_p = root / "flutter" / "lib" / "mobile" / "pages" / "server_page.dart"
+    stxt = read_text(srv_p)
+    stxt = ensure_import(stxt, "import 'dart:ui' show FontFeature;")
+
+    stxt = replace_exact(
+        stxt,
+        """                onPressed: () {
+                  if (gFFI.userModel.userName.value.isEmpty &&
+                      bind.mainGetLocalOption(key: "show-scam-warning") !=
+                          "N") {
+                    showScamWarning(context, serverModel);
+                  } else {
+                    serverModel.toggleService();
+                  }
+                },""",
+        """                onPressed: () {
+                  serverModel.toggleService();
+                },""",
+        "Bypass stranger scam countdown when starting Mobile screen share service",
+    )
+    stxt = replace_exact(
+        stxt,
+        """            PermissionRow(
+                translate("Screen Capture"),
+                serverModel.mediaOk,
+                !serverModel.mediaOk &&
+                        gFFI.userModel.userName.value.isEmpty &&
+                        bind.mainGetLocalOption(key: "show-scam-warning") != "N"
+                    ? () => showScamWarning(context, serverModel)
+                    : serverModel.toggleService),""",
+        """            PermissionRow(
+                translate("Screen Capture"),
+                serverModel.mediaOk,
+                serverModel.toggleService),""",
+        "Bypass stranger scam countdown on Mobile Screen Capture permission toggle",
+    )
+    stxt = replace_exact(
+        stxt,
+        """    final showOneTime = serverModel.approveMode != 'click' &&
+        serverModel.verificationMethod != kUsePermanentPassword;
+    return PaddingCard(
+        title: translate('Your Device'),
+        child: Column(
+          // ID
+          children: [
+            Row(children: [
+              const Icon(Icons.perm_identity,
+                      color: Colors.grey, size: iconSize)
+                  .marginOnly(right: iconMarginRight),
+              Text(
+                translate('ID'),
+                style: textStyleHeading,
+              )
+            ]),
+            Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
+              Text(
+                model.serverId.value.text,
+                style: textStyleValue,
+              ),
+              IconButton(
+                  visualDensity: VisualDensity.compact,
+                  icon: Icon(Icons.copy_outlined),
+                  onPressed: () {
+                    copyToClipboard(model.serverId.value.text.trim());
+                  })
+            ]).marginOnly(left: 39, bottom: 10),
+            // Password
+            Row(children: [
+              const Icon(Icons.lock_outline, color: Colors.grey, size: iconSize)
+                  .marginOnly(right: iconMarginRight),
+              Text(
+                translate('One-time Password'),
+                style: textStyleHeading,
+              )
+            ]),
+            Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
+              Text(
+                !showOneTime ? '-' : model.serverPasswd.value.text,
+                style: textStyleValue,
+              ),
+              !showOneTime
+                  ? SizedBox.shrink()
+                  : Row(children: [
+                      IconButton(
+                          visualDensity: VisualDensity.compact,
+                          icon: const Icon(Icons.refresh),
+                          onPressed: () => bind.mainUpdateTemporaryPassword()),
+                      IconButton(
+                          visualDensity: VisualDensity.compact,
+                          icon: Icon(Icons.copy_outlined),
+                          onPressed: () {
+                            copyToClipboard(
+                                model.serverPasswd.value.text.trim());
+                          })
+                    ])
+            ]).marginOnly(left: 40, bottom: 15),
+            ConnectionStateNotification()
+          ],
+        ));""",
+        """    return PaddingCard(
+        title: translate('Your Device'),
+        child: Column(
+          children: [
+            Row(children: [
+              const Icon(Icons.perm_identity,
+                      color: Colors.grey, size: iconSize)
+                  .marginOnly(right: iconMarginRight),
+              Text(
+                translate('ID'),
+                style: textStyleHeading,
+              )
+            ]),
+            Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
+              Text(
+                model.serverId.value.text,
+                style: const TextStyle(
+                  fontSize: 24.0,
+                  fontWeight: FontWeight.w700,
+                  fontFeatures: [FontFeature.tabularFigures()],
+                ),
+              ),
+              IconButton(
+                  visualDensity: VisualDensity.compact,
+                  icon: const Icon(Icons.copy_rounded),
+                  onPressed: () {
+                    copyToClipboard(model.serverId.value.text.trim());
+                  })
+            ]).marginOnly(left: 39, bottom: 12),
+            const Divider(height: 1),
+            const SizedBox(height: 12),
+            ConnectionStateNotification()
+          ],
+        ));""",
+        "Remove One-time Password block from Mobile Share Screen ServerInfo card",
+    )
+    stxt = replace_exact(
+        stxt,
+        "title: Text(translate('RustDesk storage')),",
+        "title: Text(translate('RRRemote storage')),",
+        "Rebrand Android file transfer workspace label",
+    )
+    stxt = replace_exact(
+        stxt,
+        "child: client.isFileTransfer || !client.authorized",
+        "child: true",
+        "Hide removed Chat tab shortcut in Mobile ConnectionManager",
+    )
+    write_text(srv_p, stxt)
+
+    # 4. Mobile settings_page.dart: hide enterprise Deploy & unused 2FA section, clean About links
+    mset_p = root / "flutter" / "lib" / "mobile" / "pages" / "settings_page.dart"
+    mstxt = read_text(mset_p)
+
+    mstxt = replace_exact(
+        mstxt,
+        """                onPressed: (context) {
+                  changeSocks5Proxy();
+                }),
+          if (isAndroid && !bind.isOutgoingOnly())
+            SettingsTile(
+                title: Text(translate('Deploy')),
+                leading: Icon(Icons.cloud_upload),
+                onPressed: (context) {
+                  showDeployDialog();
+                }),""",
+        """                onPressed: (context) {
+                  changeSocks5Proxy();
+                }),
+          // RRRemote personal edition: enterprise Deploy tile omitted""",
+        "Hide enterprise MDM Deploy tile in Mobile Settings",
+    )
+    mstxt = replace_exact(
+        mstxt,
+        """        if (isAndroid &&
+            !disabledSettings &&
+            !outgoingOnly &&
+            !hideSecuritySettings)
+          SettingsSection(title: Text('2FA'), tiles: tfaTiles),""",
+        """        if (isAndroid &&
+            !disabledSettings &&
+            !outgoingOnly &&
+            !hideSecuritySettings &&
+            enable2fa)
+          SettingsSection(title: Text('2FA'), tiles: tfaTiles),""",
+        "Hide unused 2FA section in Mobile Settings",
+    )
+    mstxt = replace_exact(
+        mstxt,
+        """            SettingsTile(
+              title: Text(translate("Privacy Statement")),
+              onPressed: (context) =>
+                  launchUrlString('https://rustdesk.com/privacy.html'),
+              leading: Icon(Icons.privacy_tip),
+            )""",
+        f"""            SettingsTile(
+              title: const Text('GitHub Repository'),
+              onPressed: (context) => launchUrlString('{repo_url}'),
+              leading: const Icon(Icons.code_rounded),
+            )""",
+        "Replace Privacy Statement tile with GitHub Repository in Mobile About",
+    )
+    mstxt = (
+        mstxt.replace("'https://rustdesk.com/'", f"'{repo_url}'")
+        .replace("'https://rustdesk.com/privacy.html'", f"'{repo_url}'")
+        .replace("Text('rustdesk.com'", "Text('RRRemote'")
+        .replace("translate('About RustDesk')", "'About RRRemote'")
+        .replace("translate('Keep RustDesk background service')", "'Keep RRRemote background service'")
+    )
+    write_text(mset_p, mstxt)
 
 
 def main() -> int:
     root = Path(sys.argv[1]).resolve() if len(sys.argv) > 1 else Path.cwd()
     update_repo = os.environ.get("UPDATE_REPO", "melotusme/RRRemote").strip()
-    print(f"[rrremote-ui] Applying industrial UI & UX polish to {root}")
-    patch_common_theme(root)
+    print(f"[rrremote-ui] Applying personal-edition UI & layout refactor to {root}")
+    patch_common_theme(root, update_repo)
     patch_desktop_home_page(root, update_repo)
-    patch_desktop_connection_page(root)
-    patch_peer_card(root)
+    patch_desktop_connection_and_tabs(root)
+    patch_desktop_settings(root, update_repo)
     patch_remote_toolbar(root)
     patch_mobile_ui(root, update_repo)
-    print("[rrremote-ui] Industrial UI & UX polish complete.")
+    print("[rrremote-ui] Personal-edition UI & layout refactor complete.")
     return 0
 
 
