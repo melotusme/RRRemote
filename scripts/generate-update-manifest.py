@@ -15,7 +15,10 @@ def main() -> int:
     out_file = Path(sys.argv[2]) if len(sys.argv) > 2 else Path("rrremote-update.json")
 
     tag = os.environ["TAG_NAME"]
-    version = os.environ["VERSION"]
+    raw_version = os.environ["VERSION"].strip()
+    # macOS update_from_dmg_as_root compares manifest.version against Info.plist CFBundleShortVersionString
+    # (base semver like "1.5.3"), so strip any leading 'v' or '-rrN' revision suffix while preserving release_id.
+    version = raw_version.lstrip("v").split("-", 1)[0]
     repo = os.environ["REPO"]
     base_url = f"https://github.com/{repo}/releases/download/{tag}"
 

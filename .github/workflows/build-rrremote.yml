@@ -60,6 +60,8 @@ env:
 jobs:
   generate-bridge:
     uses: ./.github/workflows/bridge.yml
+    with:
+      release-tag: ${{ inputs.release-tag || github.ref_name }}
 
 
   build-RustDeskTempTopMostWindow:
@@ -128,7 +130,10 @@ jobs:
           RR_API_SERVER: ${{ secrets.RR_API_SERVER }}
         shell: bash
         run: |
-          python3 -m pip install --quiet pillow 2>/dev/null || true
+          python3 -c "import PIL" 2>/dev/null || \
+            python3 -m pip install --quiet --user --break-system-packages pillow 2>/dev/null || \
+            python3 -m pip install --quiet --break-system-packages pillow 2>/dev/null || \
+            python3 -m pip install --quiet pillow 2>/dev/null || true
           python3 .rrremote/custom/apply_custom.py .
 
       - name: Restore bridge files
@@ -556,7 +561,10 @@ jobs:
           RR_API_SERVER: ${{ secrets.RR_API_SERVER }}
         shell: bash
         run: |
-          python3 -m pip install --quiet pillow 2>/dev/null || true
+          python3 -c "import PIL" 2>/dev/null || \
+            python3 -m pip install --quiet --user --break-system-packages pillow 2>/dev/null || \
+            python3 -m pip install --quiet --break-system-packages pillow 2>/dev/null || \
+            python3 -m pip install --quiet pillow 2>/dev/null || true
           python3 .rrremote/custom/apply_custom.py .
 
       - name: Import the codesign cert
@@ -639,7 +647,7 @@ jobs:
         run: |
           cd "$(dirname "$(which flutter)")"
           # https://github.com/flutter/flutter/issues/133533
-          sed -i -e 's/_setFramesEnabledState(false);/\/\/_setFramesEnabledState(false);/g' ../packages/flutter/lib/src/scheduler/binding.dart
+          sed -i '' -e 's/_setFramesEnabledState(false);/\/\/_setFramesEnabledState(false);/g' ../packages/flutter/lib/src/scheduler/binding.dart
           grep -n '_setFramesEnabledState(false);' ../packages/flutter/lib/src/scheduler/binding.dart
 
       - name: Patch RustDesk sources for Flutter 3.44 (arm64)
@@ -711,10 +719,10 @@ jobs:
         run: |
           if [ "${{ matrix.job.target }}" = "aarch64-apple-darwin" ]; then
             MIN_MACOS_VERSION="12.3"
-            sed -i -e "s/MACOSX_DEPLOYMENT_TARGET\=[0-9]*.[0-9]*/MACOSX_DEPLOYMENT_TARGET=${MIN_MACOS_VERSION}/" build.py
-            sed -i -e "s/platform :osx, '.*'/platform :osx, '${MIN_MACOS_VERSION}'/" flutter/macos/Podfile
-            sed -i -e "s/osx_minimum_system_version = \"[0-9]*.[0-9]*\"/osx_minimum_system_version = \"${MIN_MACOS_VERSION}\"/" Cargo.toml
-            sed -i -e "s/MACOSX_DEPLOYMENT_TARGET = [0-9]*.[0-9]*;/MACOSX_DEPLOYMENT_TARGET = ${MIN_MACOS_VERSION};/" flutter/macos/Runner.xcodeproj/project.pbxproj
+            sed -i '' -e "s/MACOSX_DEPLOYMENT_TARGET\=[0-9]*.[0-9]*/MACOSX_DEPLOYMENT_TARGET=${MIN_MACOS_VERSION}/" build.py
+            sed -i '' -e "s/platform :osx, '.*'/platform :osx, '${MIN_MACOS_VERSION}'/" flutter/macos/Podfile
+            sed -i '' -e "s/osx_minimum_system_version = \"[0-9]*.[0-9]*\"/osx_minimum_system_version = \"${MIN_MACOS_VERSION}\"/" Cargo.toml
+            sed -i '' -e "s/MACOSX_DEPLOYMENT_TARGET = [0-9]*.[0-9]*;/MACOSX_DEPLOYMENT_TARGET = ${MIN_MACOS_VERSION};/" flutter/macos/Runner.xcodeproj/project.pbxproj
             echo "MACOSX_DEPLOYMENT_TARGET=${MIN_MACOS_VERSION}" >> "$GITHUB_ENV"
           fi
           ./build.py --flutter --hwcodec --unix-file-copy-paste ${{ matrix.job.extra-build-args }}
@@ -742,12 +750,19 @@ jobs:
         run: |
           CREATE_DMG="$(command -v create-dmg)"
           CREATE_DMG="$(readlink -f "$CREATE_DMG")"
-          sed -i -e 's/MAXIMUM_UNMOUNTING_ATTEMPTS=3/MAXIMUM_UNMOUNTING_ATTEMPTS=7/' "$CREATE_DMG"
+          sed -i '' -e 's/MAXIMUM_UNMOUNTING_ATTEMPTS=3/MAXIMUM_UNMOUNTING_ATTEMPTS=7/' "$CREATE_DMG"
           APP_BUNDLE="./flutter/build/macos/Build/Products/Release/RRRemote.app"
           if [ ! -d "$APP_BUNDLE" ]; then
             APP_BUNDLE="$(find ./flutter/build/macos/Build/Products/Release -maxdepth 1 -name '*.app' | head -n 1)"
           fi
           APP_BASENAME="$(basename "$APP_BUNDLE")"
+          # build.py copies target/release/service into Contents/MacOS/ AFTER Xcode signs the app,
+          # breaking Xcode's bundle seal. Re-sign inside-out (Frameworks, service, and app bundle
+          # with hardened runtime + Release.entitlements) and verify before packaging the DMG.
+          bash ./.github/scripts/sign-macos-app.sh \
+            "$APP_BUNDLE" \
+            "-" \
+            ./flutter/macos/Runner/Release.entitlements
           create-dmg --volname "RRRemote" --icon "$APP_BASENAME" 200 190 --hide-extension "$APP_BASENAME" --window-size 800 400 --app-drop-link 600 185 rrremote-${{ env.VERSION }}-${{ matrix.job.arch }}.dmg "$APP_BUNDLE"
 
       - name: Upload unsigned macOS app
@@ -763,37 +778,45 @@ jobs:
           # Patch create-dmg to give more attempts to unmount image
           CREATE_DMG="$(command -v create-dmg)"
           CREATE_DMG="$(readlink -f "$CREATE_DMG")"
-          sed -i -e 's/MAXIMUM_UNMOUNTING_ATTEMPTS=3/MAXIMUM_UNMOUNTING_ATTEMPTS=7/' "$CREATE_DMG"
+          sed -i '' -e 's/MAXIMUM_UNMOUNTING_ATTEMPTS=3/MAXIMUM_UNMOUNTING_ATTEMPTS=7/' "$CREATE_DMG"
           # Unlock keychain
           security default-keychain -s rustdesk.keychain
           security unlock-keychain -p ${{ secrets.MACOS_P12_PASSWORD }} rustdesk.keychain
-          # start sign the rustdesk.app and dmg
+          APP_BUNDLE="./flutter/build/macos/Build/Products/Release/RRRemote.app"
+          if [ ! -d "$APP_BUNDLE" ]; then
+            APP_BUNDLE="$(find ./flutter/build/macos/Build/Products/Release -maxdepth 1 -name '*.app' | head -n 1)"
+          fi
+          APP_BASENAME="$(basename "$APP_BUNDLE")"
+          APP_EXEC="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$APP_BUNDLE/Contents/Info.plist" 2>/dev/null || echo 'RRRemote')"
+          # start sign the RRRemote.app and dmg
           rm -rf *.dmg || true
           # the identity secret carries its own shell quoting, so expand it inline like the dmg codesign below
           bash ./.github/scripts/sign-macos-app.sh \
-            ./flutter/build/macos/Build/Products/Release/RustDesk.app \
+            "$APP_BUNDLE" \
             ${{ secrets.MACOS_CODESIGN_IDENTITY }} \
             ./flutter/macos/Runner/Release.entitlements
           if [ "$PUBLISH_UPDATE_METADATA" = "true" ]; then
-            reported_version="$(./flutter/build/macos/Build/Products/Release/RustDesk.app/Contents/MacOS/RustDesk --version)"
+            reported_version="$("$APP_BUNDLE/Contents/MacOS/$APP_EXEC" --version)"
             if [ "$reported_version" != "$VERSION" ]; then
-              echo "::error::RustDesk reports version '$reported_version', expected '$VERSION'"
+              echo "::error::RRRemote reports version '$reported_version', expected '$VERSION'"
               exit 1
             fi
           fi
-          create-dmg --icon "RustDesk.app" 200 190 --hide-extension "RustDesk.app" --window-size 800 400 --app-drop-link 600 185 rustdesk-${{ env.VERSION }}.dmg ./flutter/build/macos/Build/Products/Release/RustDesk.app
-          codesign --force --options runtime -s ${{ secrets.MACOS_CODESIGN_IDENTITY }} --deep --strict rustdesk-${{ env.VERSION }}.dmg -vvv
-          # notarize the rustdesk-${{ env.VERSION }}.dmg
-          rcodesign notary-submit --api-key-path ${{ github.workspace }}/rustdesk.json  --staple rustdesk-${{ env.VERSION }}.dmg
+          create-dmg --volname "RRRemote" --icon "$APP_BASENAME" 200 190 --hide-extension "$APP_BASENAME" --window-size 800 400 --app-drop-link 600 185 rrremote-${{ env.VERSION }}.dmg "$APP_BUNDLE"
+          codesign --force --options runtime -s ${{ secrets.MACOS_CODESIGN_IDENTITY }} --deep --strict rrremote-${{ env.VERSION }}.dmg -vvv
+          # notarize the rrremote-${{ env.VERSION }}.dmg
+          rcodesign notary-submit --api-key-path ${{ github.workspace }}/rustdesk.json --staple rrremote-${{ env.VERSION }}.dmg
 
-      - name: Rename rustdesk
+      - name: Rename macOS DMG
         if: env.UPLOAD_ARTIFACT == 'true'
         shell: bash
         env:
           VERSION: ${{ env.VERSION }}
           ARCH: ${{ matrix.job.arch }}
         run: |
-          if [ -f "rustdesk-${VERSION}.dmg" ]; then
+          if [ -f "rrremote-${VERSION}.dmg" ]; then
+              mv "rrremote-${VERSION}.dmg" "rrremote-${VERSION}-${ARCH}.dmg"
+          elif [ -f "rustdesk-${VERSION}.dmg" ]; then
               mv "rustdesk-${VERSION}.dmg" "rrremote-${VERSION}-${ARCH}.dmg"
           fi
           test -f "rrremote-${VERSION}-${ARCH}.dmg"
@@ -874,7 +897,10 @@ jobs:
           RR_API_SERVER: ${{ secrets.RR_API_SERVER }}
         shell: bash
         run: |
-          python3 -m pip install --quiet pillow 2>/dev/null || true
+          python3 -c "import PIL" 2>/dev/null || \
+            python3 -m pip install --quiet --user --break-system-packages pillow 2>/dev/null || \
+            python3 -m pip install --quiet --break-system-packages pillow 2>/dev/null || \
+            python3 -m pip install --quiet pillow 2>/dev/null || true
           python3 .rrremote/custom/apply_custom.py .
 
       - name: Set Swap Space
@@ -1268,7 +1294,10 @@ jobs:
           RR_API_SERVER: ${{ secrets.RR_API_SERVER }}
         shell: bash
         run: |
-          python3 -m pip install --quiet pillow 2>/dev/null || true
+          python3 -c "import PIL" 2>/dev/null || \
+            python3 -m pip install --quiet --user --break-system-packages pillow 2>/dev/null || \
+            python3 -m pip install --quiet --break-system-packages pillow 2>/dev/null || \
+            python3 -m pip install --quiet pillow 2>/dev/null || true
           python3 .rrremote/custom/apply_custom.py .
 
       - name: Install flutter
@@ -1527,7 +1556,10 @@ jobs:
           RR_API_SERVER: ${{ secrets.RR_API_SERVER }}
         shell: bash
         run: |
-          python3 -m pip install --quiet pillow 2>/dev/null || true
+          python3 -c "import PIL" 2>/dev/null || \
+            python3 -m pip install --quiet --user --break-system-packages pillow 2>/dev/null || \
+            python3 -m pip install --quiet --break-system-packages pillow 2>/dev/null || \
+            python3 -m pip install --quiet pillow 2>/dev/null || true
           python3 .rrremote/custom/apply_custom.py .
 
       - name: Install flutter
@@ -1626,7 +1658,7 @@ jobs:
       - build-rustdesk-linux
       - build-rustdesk-android
       - build-rustdesk-ios
-    if: ${{ always() }}
+    if: ${{ !cancelled() && (needs.build-for-windows-flutter.result == 'success' || needs.build-for-macOS.result == 'success' || needs.build-rustdesk-linux.result == 'success' || needs.build-rustdesk-android.result == 'success' || needs.build-rustdesk-ios.result == 'success') }}
     runs-on: ubuntu-latest
     steps:
       - name: Checkout RRRemote scripts
@@ -1638,9 +1670,52 @@ jobs:
           TAG_NAME: ${{ env.TAG_NAME }}
           VERSION: ${{ env.VERSION }}
           REPO: ${{ github.repository }}
+          WIN_RESULT: ${{ needs.build-for-windows-flutter.result }}
+          MAC_RESULT: ${{ needs.build-for-macOS.result }}
+          LINUX_RESULT: ${{ needs.build-rustdesk-linux.result }}
+          ANDROID_RESULT: ${{ needs.build-rustdesk-android.result }}
+          IOS_RESULT: ${{ needs.build-rustdesk-ios.result }}
         run: |
           set -euo pipefail
+          failed_jobs=()
+          for pair in "windows:${WIN_RESULT}" "macos:${MAC_RESULT}" "linux:${LINUX_RESULT}" "android:${ANDROID_RESULT}" "ios:${IOS_RESULT}"; do
+            job="${pair%%:*}"
+            res="${pair#*:}"
+            if [ "$res" != "success" ]; then
+              failed_jobs+=("${job}=${res}")
+            fi
+          done
+          if [ "${#failed_jobs[@]}" -gt 0 ]; then
+            echo "::warning::Some platform builds did not succeed (${failed_jobs[*]}). Will only publish manifest if it does not regress an existing release manifest."
+          fi
+
           mkdir -p /tmp/rr-assets
           gh release download "$TAG_NAME" -R "$REPO" -D /tmp/rr-assets --skip-existing
           python3 scripts/generate-update-manifest.py /tmp/rr-assets rrremote-update.json
+
+          python3 - << 'PYEOF'
+          import json, sys
+          from pathlib import Path
+
+          new_manifest = json.loads(Path("rrremote-update.json").read_text(encoding="utf-8"))
+          new_artifacts = new_manifest.get("artifacts", [])
+          if not new_artifacts:
+              print("::error::Generated rrremote-update.json has 0 artifacts; refusing to publish.", file=sys.stderr)
+              sys.exit(1)
+
+          existing_path = Path("/tmp/rr-assets/rrremote-update.json")
+          if existing_path.is_file():
+              try:
+                  old_artifacts = json.loads(existing_path.read_text(encoding="utf-8")).get("artifacts", [])
+                  if len(new_artifacts) < len(old_artifacts):
+                      print(
+                          f"::error::Refusing to overwrite existing rrremote-update.json "
+                          f"({len(old_artifacts)} artifacts) with an incomplete manifest ({len(new_artifacts)} artifacts).",
+                          file=sys.stderr,
+                      )
+                      sys.exit(1)
+              except Exception as exc:
+                  print(f"::warning::Could not parse existing rrremote-update.json ({exc}); proceeding with new manifest.")
+          PYEOF
+
           gh release upload "$TAG_NAME" rrremote-update.json -R "$REPO" --clobber

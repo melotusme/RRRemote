@@ -329,6 +329,30 @@ impl Config2 {"""
         changed = True
         print("[rrremote] Injected default RS_PUB_KEY from environment.")
 
+    baked_key_const = f"pub const RRREMOTE_HAS_BAKED_KEY: bool = {'true' if pub_key else 'false'};"
+    if "pub const RRREMOTE_HAS_BAKED_KEY:" in content:
+        new_content, count = re.subn(
+            r"pub const RRREMOTE_HAS_BAKED_KEY:\s*bool\s*=\s*(?:true|false);",
+            baked_key_const,
+            content,
+            count=1,
+        )
+        if new_content != content:
+            content = new_content
+            changed = True
+    else:
+        new_content, count = re.subn(
+            r'(pub const RS_PUB_KEY:\s*&str\s*=\s*"[^"]*";)',
+            rf"\1\n{baked_key_const}",
+            content,
+            count=1,
+        )
+        if count != 1:
+            raise RuntimeError("Failed to insert RRREMOTE_HAS_BAKED_KEY in libs/hbb_common/src/config.rs")
+        content = new_content
+        changed = True
+        print(f"[rrremote] Recorded RRREMOTE_HAS_BAKED_KEY = {'true' if pub_key else 'false'}.")
+
     if api_server:
         pattern = r'pub const OPTION_API_SERVER:\s*&str\s*=\s*"api-server";'
         if re.search(pattern, content) and "RRREMOTE_DEFAULT_API_SERVER" not in content:
@@ -442,6 +466,192 @@ pub fn enable_hwcodec_option() -> bool {
         print("[rrremote] Added immediate frame-1 VideoToolbox -> VP9/AV1 fallback in src/server/video_service.rs.")
     else:
         raise RuntimeError("Failed to locate handle_one_frame switch condition in src/server/video_service.rs")
+
+
+def patch_macos_input_reliability(root: Path) -> None:
+    """Prevent macOS keyboard blackouts on missing Input Monitoring & log silent Accessibility drops."""
+    # 1. src/keyboard.rs: guarantee Flutter Input source 2 fallback whenever macOS Input Monitoring
+    #    is denied without permanently overwriting LocalConfig (so native rdev recovers once granted).
+    kb_rs = root / "src" / "keyboard.rs"
+    if not kb_rs.exists():
+        raise FileNotFoundError(f"Expected {kb_rs}")
+    kb_txt = read_text(kb_rs)
+    kb_changed = False
+
+    old_init_src = """        #[cfg(target_os = "macos")]
+        if !crate::platform::macos::is_can_input_monitoring(false) {
+            log::error!("init_input_source, is_can_input_monitoring() false");
+            set_local_option(
+                CONFIG_OPTION_INPUT_SOURCE.to_string(),
+                CONFIG_INPUT_SOURCE_2.to_string(),
+            );
+            return;
+        }"""
+    new_init_src = """        #[cfg(target_os = "macos")]
+        if !crate::platform::macos::is_can_input_monitoring(false) {
+            log::error!(
+                "init_input_source, is_can_input_monitoring() false; falling back to Flutter Input source 2 without overwriting saved config"
+            );
+            return;
+        }"""
+    if "falling back to Flutter Input source 2 without overwriting saved config" in kb_txt:
+        print("[rrremote] macOS init_input_source non-destructive fallback already patched in src/keyboard.rs.")
+    elif old_init_src in kb_txt:
+        kb_txt = kb_txt.replace(old_init_src, new_init_src, 1)
+        kb_changed = True
+        print("[rrremote] Patched src/keyboard.rs::init_input_source() to avoid permanently overwriting input-source on macOS.")
+    else:
+        raise RuntimeError("Failed to locate macOS init_input_source block in src/keyboard.rs")
+
+    old_get_src = """    #[inline]
+    pub fn get_cur_session_input_source() -> String {
+        #[cfg(target_os = "linux")]
+        if !crate::platform::linux::is_x11() {
+            return CONFIG_INPUT_SOURCE_2.to_string();
+        }
+        let input_source = get_local_option(CONFIG_OPTION_INPUT_SOURCE.to_string());"""
+    new_get_src = """    #[inline]
+    pub fn get_cur_session_input_source() -> String {
+        #[cfg(target_os = "linux")]
+        if !crate::platform::linux::is_x11() {
+            return CONFIG_INPUT_SOURCE_2.to_string();
+        }
+        #[cfg(target_os = "macos")]
+        if !crate::platform::macos::is_can_input_monitoring(false) {
+            return CONFIG_INPUT_SOURCE_2.to_string();
+        }
+        let input_source = get_local_option(CONFIG_OPTION_INPUT_SOURCE.to_string());"""
+    if (
+        '#[cfg(target_os = "macos")]\n'
+        "        if !crate::platform::macos::is_can_input_monitoring(false) {\n"
+        "            return CONFIG_INPUT_SOURCE_2.to_string();\n"
+        "        }"
+    ) in kb_txt:
+        print("[rrremote] macOS get_cur_session_input_source guard already patched in src/keyboard.rs.")
+    elif old_get_src in kb_txt:
+        kb_txt = kb_txt.replace(old_get_src, new_get_src, 1)
+        kb_changed = True
+        print("[rrremote] Added macOS Input Monitoring guard in src/keyboard.rs::get_cur_session_input_source().")
+    else:
+        raise RuntimeError("Failed to locate get_cur_session_input_source() in src/keyboard.rs")
+
+    if kb_changed:
+        write_text(kb_rs, kb_txt)
+
+    # 2. src/server/input_service.rs: lazily re-init VIRTUAL_INPUT_STATE on macOS if None, and emit
+    #    a throttled warning when remote mouse/keyboard input arrives while Accessibility is denied.
+    inp_rs = root / "src" / "server" / "input_service.rs"
+    if not inp_rs.exists():
+        raise FileNotFoundError(f"Expected {inp_rs}")
+    inp_txt = read_text(inp_rs)
+    inp_changed = False
+
+    old_mouse_mac = """    #[cfg(target_os = "macos")]
+    en.set_ignore_flags(enigo_ignore_flags());"""
+    new_mouse_mac = """    #[cfg(target_os = "macos")]
+    {
+        warn_if_macos_accessibility_denied("mouse");
+        en.set_ignore_flags(enigo_ignore_flags());
+    }"""
+    if 'warn_if_macos_accessibility_denied("mouse");' in inp_txt:
+        print("[rrremote] macOS mouse Accessibility warning already patched in src/server/input_service.rs.")
+    elif old_mouse_mac in inp_txt:
+        inp_txt = inp_txt.replace(old_mouse_mac, new_mouse_mac, 1)
+        inp_changed = True
+        print("[rrremote] Added throttled macOS Accessibility warning for remote mouse input in src/server/input_service.rs.")
+    else:
+        raise RuntimeError("Failed to locate macOS handle_mouse_simulation_ anchor in src/server/input_service.rs")
+
+    old_key_mac = """#[inline]
+#[cfg(target_os = "macos")]
+pub fn handle_key(evt: &KeyEvent) {
+    // having GUI, run main GUI thread, otherwise crash
+    let evt = evt.clone();
+    QUEUE.exec_async(move || handle_key_(&evt));"""
+    new_key_mac = """#[inline]
+#[cfg(target_os = "macos")]
+pub fn handle_key(evt: &KeyEvent) {
+    warn_if_macos_accessibility_denied("keyboard");
+    // having GUI, run main GUI thread, otherwise crash
+    let evt = evt.clone();
+    QUEUE.exec_async(move || handle_key_(&evt));"""
+    if 'warn_if_macos_accessibility_denied("keyboard");' in inp_txt:
+        print("[rrremote] macOS keyboard Accessibility warning already patched in src/server/input_service.rs.")
+    elif old_key_mac in inp_txt:
+        inp_txt = inp_txt.replace(old_key_mac, new_key_mac, 1)
+        inp_changed = True
+        print("[rrremote] Added throttled macOS Accessibility warning for remote keyboard input in src/server/input_service.rs.")
+    else:
+        raise RuntimeError("Failed to locate macOS handle_key() in src/server/input_service.rs")
+
+    old_sim = """#[inline]
+#[cfg(target_os = "macos")]
+fn simulate_(event_type: &EventType) {
+    unsafe {
+        let _lock = VIRTUAL_INPUT_MTX.lock();
+        if let Some(input) = VIRTUAL_INPUT_STATE.as_ref() {
+            let _ = input.simulate(&event_type);
+        } else if matches!(event_type, EventType::KeyRelease(_)) {
+            hbb_common::throttled_log!(
+                VirtualInputState::KEY_UP_ERROR_LOG_INTERVAL,
+                error,
+                "Failed to inject macOS key-up: virtual input is not initialized"
+            );
+        }
+    }
+}"""
+    new_sim = """#[inline]
+#[cfg(target_os = "macos")]
+fn warn_if_macos_accessibility_denied(kind: &str) {
+    use std::sync::atomic::AtomicI64;
+    static LAST_AX_WARN_MS: AtomicI64 = AtomicI64::new(0);
+    if !crate::platform::macos::is_process_trusted(false) {
+        let now = get_time();
+        let prev = LAST_AX_WARN_MS.load(Ordering::Relaxed);
+        if now - prev >= 10_000
+            && LAST_AX_WARN_MS
+                .compare_exchange(prev, now, Ordering::Relaxed, Ordering::Relaxed)
+                .is_ok()
+        {
+            log::warn!(
+                "macOS Accessibility (AXIsProcessTrusted) is NOT granted; remote {} input is silently dropped by WindowServer. Re-add RRRemote in System Settings -> Privacy & Security -> Accessibility.",
+                kind
+            );
+        }
+    }
+}
+
+#[inline]
+#[cfg(target_os = "macos")]
+fn simulate_(event_type: &EventType) {
+    unsafe {
+        let _lock = VIRTUAL_INPUT_MTX.lock();
+        if VIRTUAL_INPUT_STATE.is_none() {
+            VIRTUAL_INPUT_STATE = VirtualInputState::new();
+        }
+        if let Some(input) = VIRTUAL_INPUT_STATE.as_ref() {
+            let _ = input.simulate(&event_type);
+        } else {
+            hbb_common::throttled_log!(
+                VirtualInputState::KEY_UP_ERROR_LOG_INTERVAL,
+                error,
+                "Failed to inject macOS key event {:?}: virtual input could not be initialized",
+                event_type
+            );
+        }
+    }
+}"""
+    if "fn warn_if_macos_accessibility_denied(kind: &str)" in inp_txt:
+        print("[rrremote] macOS VIRTUAL_INPUT_STATE lazy re-init & Accessibility helper already patched in src/server/input_service.rs.")
+    elif old_sim in inp_txt:
+        inp_txt = inp_txt.replace(old_sim, new_sim, 1)
+        inp_changed = True
+        print("[rrremote] Added macOS VIRTUAL_INPUT_STATE lazy re-init & Accessibility diagnostics in src/server/input_service.rs.")
+    else:
+        raise RuntimeError("Failed to locate macOS simulate_() in src/server/input_service.rs")
+
+    if inp_changed:
+        write_text(inp_rs, inp_txt)
 
 
 def patch_update_checker(root: Path, update_repo: str, build_tag: str) -> None:
@@ -985,18 +1195,23 @@ def patch_display_branding(root: Path, display_name: str, update_repo: str) -> N
             write_text(win_rc, updated)
             print(f"[rrremote] Updated Windows Runner.rc product metadata to {display_name}.")
 
-    # 4. macOS app bundle name (RRRemote.app), DisplayName, Menu Bar & URL scheme
+    # 4. macOS app bundle name (RRRemote.app), Bundle ID, DisplayName, TCC usage descriptions, Menu Bar & URL scheme
+    mac_bundle_id = f"com.carriez.{lower_name}"
     mac_xcconfig = root / "flutter" / "macos" / "Runner" / "Configs" / "AppInfo.xcconfig"
     if mac_xcconfig.exists():
         txt = read_text(mac_xcconfig)
         updated = txt.replace("PRODUCT_NAME = RustDesk", f"PRODUCT_NAME = {display_name}")
+        updated = updated.replace(
+            "PRODUCT_BUNDLE_IDENTIFIER = com.carriez.flutterHbb",
+            f"PRODUCT_BUNDLE_IDENTIFIER = {mac_bundle_id}",
+        )
         updated = updated.replace(
             "PRODUCT_COPYRIGHT = Copyright © 2026 Purslane Tech Pte. Ltd. All rights reserved.",
             f"PRODUCT_COPYRIGHT = Copyright © 2026 {display_name}. All rights reserved.",
         )
         if updated != txt:
             write_text(mac_xcconfig, updated)
-            print(f"[rrremote] Updated macOS AppInfo.xcconfig PRODUCT_NAME to {display_name}.")
+            print(f"[rrremote] Updated macOS AppInfo.xcconfig PRODUCT_NAME & PRODUCT_BUNDLE_IDENTIFIER ({mac_bundle_id}).")
 
     mac_plist = root / "flutter" / "macos" / "Runner" / "Info.plist"
     if mac_plist.exists():
@@ -1009,12 +1224,35 @@ def patch_display_branding(root: Path, display_name: str, update_repo: str) -> N
                 1,
             )
         updated = updated.replace(
+            "<string>com.carriez.rustdesk</string>",
+            f"<string>{mac_bundle_id}</string>",
+        )
+        updated = updated.replace(
             "<string>rustdesk</string>",
             f"<string>{lower_name}</string>",
         )
+        usage_insert = ""
+        if "<key>NSLocalNetworkUsageDescription</key>" not in updated:
+            usage_insert += (
+                "\t<key>NSLocalNetworkUsageDescription</key>\n"
+                f"\t<string>{display_name} uses local network access for LAN device discovery and direct low-latency connections.</string>\n"
+            )
+        if "<key>NSCameraUsageDescription</key>" not in updated:
+            usage_insert += (
+                "\t<key>NSCameraUsageDescription</key>\n"
+                f"\t<string>{display_name} uses camera access when remote camera viewing is enabled.</string>\n"
+            )
+        if usage_insert:
+            if "\t<key>NSPrincipalClass</key>" not in updated:
+                raise RuntimeError("Failed to locate NSPrincipalClass in flutter/macos/Runner/Info.plist")
+            updated = updated.replace(
+                "\t<key>NSPrincipalClass</key>",
+                f"{usage_insert}\t<key>NSPrincipalClass</key>",
+                1,
+            )
         if updated != txt:
             write_text(mac_plist, updated)
-            print(f"[rrremote] Updated macOS Info.plist display name & URL scheme to {display_name}.")
+            print(f"[rrremote] Updated macOS Info.plist display name, URL scheme, bundle ID ({mac_bundle_id}) & TCC usage descriptions.")
 
     mac_menu = root / "flutter" / "macos" / "Runner" / "Base.lproj" / "MainMenu.xib"
     if mac_menu.exists():
@@ -1029,12 +1267,53 @@ def patch_display_branding(root: Path, display_name: str, update_repo: str) -> N
     mac_pbxproj = root / "flutter" / "macos" / "Runner.xcodeproj" / "project.pbxproj"
     if mac_pbxproj.exists():
         txt = read_text(mac_pbxproj)
-        updated = txt.replace("/* RustDesk.app */", f"/* {display_name}.app */").replace(
-            "path = RustDesk.app;", f"path = {display_name}.app;"
+        updated = (
+            txt.replace("/* RustDesk.app */", f"/* {display_name}.app */")
+            .replace("path = RustDesk.app;", f"path = {display_name}.app;")
+            .replace(
+                "PRODUCT_BUNDLE_IDENTIFIER = com.carriez.rustdesk;",
+                f"PRODUCT_BUNDLE_IDENTIFIER = {mac_bundle_id};",
+            )
         )
         if updated != txt:
             write_text(mac_pbxproj, updated)
-            print(f"[rrremote] Updated macOS project.pbxproj product reference to {display_name}.app.")
+            print(f"[rrremote] Updated macOS project.pbxproj product reference & bundle ID ({mac_bundle_id}).")
+
+    # 4b. Fix macOS menu bar tray icon: use embedded transparent template res/mac-tray-dark-x2.png
+    #     instead of opaque flutter_assets/assets/icon.png (which turns into a solid square blob under template rendering).
+    tray_rs = root / "src" / "tray.rs"
+    if tray_rs.exists():
+        ttxt = read_text(tray_rs)
+        old_tray_img = """    let (icon_rgba, icon_width, icon_height) = {
+        let image = load_icon_from_asset()
+            .unwrap_or(image::load_from_memory(icon).context("Failed to open icon path")?)
+            .into_rgba8();"""
+        new_tray_img = """    let (icon_rgba, icon_width, icon_height) = {
+        #[cfg(target_os = "macos")]
+        let image = image::load_from_memory(icon)
+            .context("Failed to open icon path")?
+            .into_rgba8();
+        #[cfg(not(target_os = "macos"))]
+        let image = load_icon_from_asset()
+            .unwrap_or(image::load_from_memory(icon).context("Failed to open icon path")?)
+            .into_rgba8();"""
+        tchanged = False
+        if new_tray_img in ttxt:
+            print("[rrremote] macOS tray template icon patch already applied in src/tray.rs.")
+        elif old_tray_img in ttxt:
+            ttxt = ttxt.replace(old_tray_img, new_tray_img, 1)
+            tchanged = True
+            print("[rrremote] Patched src/tray.rs to use transparent template icon on macOS.")
+        else:
+            raise RuntimeError("Failed to locate tray icon loader in src/tray.rs")
+
+        old_load_fn = "fn load_icon_from_asset() -> Option<image::DynamicImage> {"
+        new_load_fn = '#[cfg(not(target_os = "macos"))]\nfn load_icon_from_asset() -> Option<image::DynamicImage> {'
+        if new_load_fn not in ttxt and old_load_fn in ttxt:
+            ttxt = ttxt.replace(old_load_fn, new_load_fn, 1)
+            tchanged = True
+        if tchanged:
+            write_text(tray_rs, ttxt)
 
     # 5. Linux binary name (rrremote), desktop entries, systemd service, GTK title & packaging
     linux_cmake = root / "flutter" / "linux" / "CMakeLists.txt"
@@ -1230,6 +1509,14 @@ post_remove() {{
                 "Release/RustDesk.app/Contents/MacOS/",
                 f"Release/{display_name}.app/Contents/MacOS/",
             )
+            .replace(
+                'create-dmg --volname \\"RustDesk Installer\\" --window-pos 200 120 --window-size 800 400 --icon-size 100 --app-drop-link 600 185 --icon RustDesk.app 200 190 --hide-extension RustDesk.app rustdesk.dmg ./build/macos/Build/Products/Release/RustDesk.app',
+                f'create-dmg --volname \\"{display_name} Installer\\" --window-pos 200 120 --window-size 800 400 --icon-size 100 --app-drop-link 600 185 --icon {display_name}.app 200 190 --hide-extension {display_name}.app {lower_name}.dmg ./build/macos/Build/Products/Release/{display_name}.app',
+            )
+            .replace(
+                'os.rename("rustdesk.dmg", f"../rustdesk-{version}.dmg")',
+                f'os.rename("{lower_name}.dmg", f"../{lower_name}-{{version}}.dmg")',
+            )
             .replace("Package: rustdesk", f"Package: {lower_name}")
             .replace("Maintainer: rustdesk <info@rustdesk.com>", f"Maintainer: {display_name}")
             .replace("Homepage: https://rustdesk.com", f"Homepage: {repo_url}")
@@ -1308,7 +1595,7 @@ def patch_personal_ergonomics(root: Path) -> None:
     txt = read_text(conn_rs)
     old_auth = """            if (password::approve_mode() == ApproveMode::Click && !allow_logon_screen_password)
                 || password::approve_mode() == ApproveMode::Both && !password::has_valid_password()"""
-    new_auth = """            if !Config::get_option("key").is_empty()
+    new_auth = """            if (!Config::get_option("key").is_empty() || hbb_common::config::RRREMOTE_HAS_BAKED_KEY)
                 && Config::get_option("approve-mode") != "click"
             {
                 if !self.send_logon_response_and_keep_alive().await {
@@ -1336,7 +1623,59 @@ def patch_personal_ergonomics(root: Path) -> None:
     ctxt = read_text(common_rs)
     cchanged = False
 
-    lan_helper = """pub fn resolve_non_tun_lan_ipv4() -> Option<std::net::Ipv4Addr> {
+    lan_helper = """#[cfg(not(target_os = "ios"))]
+pub fn is_virtual_or_tun_interface(interface: &default_net::Interface) -> bool {
+    if matches!(
+        interface.if_type,
+        default_net::interface::InterfaceType::Loopback
+            | default_net::interface::InterfaceType::Tunnel
+            | default_net::interface::InterfaceType::Ppp
+    ) {
+        return true;
+    }
+    #[cfg(unix)]
+    {
+        // POSIX IFF_UP (0x1), IFF_LOOPBACK (0x8), IFF_POINTOPOINT (0x10)
+        if (interface.flags & 0x1) == 0
+            || (interface.flags & 0x8) != 0
+            || (interface.flags & 0x10) != 0
+        {
+            return true;
+        }
+    }
+    #[cfg(target_os = "macos")]
+    {
+        // Darwin IFF_RUNNING (0x40): skip configured-but-inactive interfaces
+        if (interface.flags & 0x40) == 0 {
+            return true;
+        }
+    }
+    let lname = interface.name.to_ascii_lowercase();
+    lname.starts_with("utun")
+        || lname.starts_with("tun")
+        || lname.starts_with("tap")
+        || lname.starts_with("wg")
+        || lname.starts_with("tailscale")
+        || lname.starts_with("docker")
+        || lname.starts_with("veth")
+        || lname.starts_with("br-")
+        || lname.starts_with("bridge")
+        || lname.starts_with("vmenet")
+        || lname.starts_with("vmnet")
+        || lname.starts_with("vboxnet")
+        || lname.starts_with("feth")
+        || lname.starts_with("ap1")
+        || lname.starts_with("awdl")
+        || lname.starts_with("llw")
+        || lname.starts_with("anpi")
+        || lname.starts_with("gif")
+        || lname.starts_with("stf")
+        || lname.starts_with("pdp_ip")
+        || lname.starts_with("ipsec")
+        || lname.starts_with("lo")
+}
+
+pub fn resolve_non_tun_lan_ipv4() -> Option<std::net::Ipv4Addr> {
     #[cfg(target_os = "ios")]
     {
         None
@@ -1345,19 +1684,7 @@ def patch_personal_ergonomics(root: Path) -> None:
     {
         let mut fallback: Option<std::net::Ipv4Addr> = None;
         for interface in default_net::get_interfaces() {
-            let lname = interface.name.to_ascii_lowercase();
-            let is_virtual_if = lname.starts_with("utun")
-                || lname.starts_with("tun")
-                || lname.starts_with("tap")
-                || lname.starts_with("wg")
-                || lname.starts_with("tailscale")
-                || lname.starts_with("docker")
-                || lname.starts_with("veth")
-                || lname.starts_with("br-")
-                || lname.starts_with("vmnet")
-                || lname.starts_with("vboxnet")
-                || lname.starts_with("lo");
-            if is_virtual_if {
+            if is_virtual_or_tun_interface(&interface) {
                 continue;
             }
             let has_hw_mac = interface
@@ -1399,7 +1726,7 @@ async fn test_nat_type_() -> ResultType<bool> {"""
             raise RuntimeError("Failed to locate test_nat_type_() in src/common.rs")
         ctxt = ctxt.replace(nat_marker, lan_helper, 1)
         cchanged = True
-        print("[rrremote] Added resolve_non_tun_lan_ipv4() helper in src/common.rs.")
+        print("[rrremote] Added is_virtual_or_tun_interface() & resolve_non_tun_lan_ipv4() in src/common.rs.")
 
     old_nat_ip = """        if i == 0 {
             // reuse the local addr is required for nat test
@@ -1447,6 +1774,14 @@ async fn test_nat_type_() -> ResultType<bool> {"""
         let local_addr: SocketAddr =
             format!("{}:{}", local_addr.ip(), local_addr.port()).parse()?;"""
     new_intranet = """        let local_addr = socket.local_addr();
+        if peer_addr.ip().is_loopback() || local_addr.ip().is_loopback() {
+            drop(slot);
+            bail!(
+                "Skip intranet listen on loopback/co-located proxy route (local={}, peer={})",
+                local_addr,
+                peer_addr
+            );
+        }
         if hbb_common::config::is_tun_fake_ip(&local_addr.ip()) {
             let Some(lan_v4) = crate::common::resolve_non_tun_lan_ipv4() else {
                 bail!("Skip intranet listen on TUN fake-IP {}", local_addr);
@@ -1468,7 +1803,7 @@ async fn test_nat_type_() -> ResultType<bool> {"""
             socket.send_raw(bytes).await?;
             drop(socket);
             if let Ok(Ok((stream, addr))) =
-                hbb_common::timeout(CONNECT_TIMEOUT, listener.accept()).await
+                hbb_common::timeout(3_000, listener.accept()).await
             {
                 drop(slot);
                 accept_punched_connection(server, stream, addr, meta).await;
@@ -1518,6 +1853,91 @@ async fn test_nat_type_() -> ResultType<bool> {"""
     else:
         raise RuntimeError("Failed to locate allow_tcp_punch connect_tcp_local in src/client.rs")
 
+    # 5. Wire virtual/TUN interface & RFC 2544 fake-IP filtering into src/lan.rs so LAN Discovery
+    #    and Wake-on-LAN broadcast cleanly over physical NICs (e.g. en0) instead of failing with
+    #    AddrNotAvailable on macOS utun / bridge / VM interfaces.
+    lan_rs = root / "src" / "lan.rs"
+    if not lan_rs.exists():
+        raise FileNotFoundError(f"Expected {lan_rs}")
+    ltxt = read_text(lan_rs)
+    lchanged = False
+
+    old_lan_bcast = """    #[cfg(not(any(target_os = "ios")))]
+    for interface in default_net::get_interfaces() {
+        for ipv4 in &interface.ipv4 {
+            ipv4s.push(ipv4.addr.clone());
+        }
+    }"""
+    new_lan_bcast = """    #[cfg(not(any(target_os = "ios")))]
+    for interface in default_net::get_interfaces() {
+        if crate::common::is_virtual_or_tun_interface(&interface) {
+            continue;
+        }
+        for ipv4 in &interface.ipv4 {
+            let addr = ipv4.addr;
+            if addr.is_loopback()
+                || addr.is_unspecified()
+                || addr.is_link_local()
+                || hbb_common::config::is_tun_fake_ip(&std::net::IpAddr::V4(addr))
+            {
+                continue;
+            }
+            ipv4s.push(addr);
+        }
+    }"""
+    if "crate::common::is_virtual_or_tun_interface(&interface)" in ltxt:
+        print("[rrremote] LAN discovery virtual/TUN interface filter already patched in src/lan.rs.")
+    elif old_lan_bcast in ltxt:
+        ltxt = ltxt.replace(old_lan_bcast, new_lan_bcast, 1)
+        lchanged = True
+        print("[rrremote] Filtered virtual/TUN interfaces & fake-IPs in src/lan.rs::create_broadcast_sockets().")
+    else:
+        raise RuntimeError("Failed to locate create_broadcast_sockets loop in src/lan.rs")
+
+    old_lan_peer_ip = """    match socket.local_addr() {
+        Ok(addr) => return Some(addr.ip()),
+        Err(_) => return None,
+    };"""
+    new_lan_peer_ip = """    match socket.local_addr() {
+        Ok(addr) => {
+            let ip = addr.ip();
+            if hbb_common::config::is_tun_fake_ip(&ip) {
+                return crate::common::resolve_non_tun_lan_ipv4().map(IpAddr::V4);
+            }
+            return Some(ip);
+        }
+        Err(_) => return None,
+    };"""
+    if "crate::common::resolve_non_tun_lan_ipv4().map(IpAddr::V4)" in ltxt:
+        print("[rrremote] LAN get_ipaddr_by_peer TUN fake-IP fallback already patched in src/lan.rs.")
+    elif old_lan_peer_ip in ltxt:
+        ltxt = ltxt.replace(old_lan_peer_ip, new_lan_peer_ip, 1)
+        lchanged = True
+        print("[rrremote] Added TUN fake-IP fallback in src/lan.rs::get_ipaddr_by_peer().")
+    else:
+        raise RuntimeError("Failed to locate get_ipaddr_by_peer local_addr in src/lan.rs")
+
+    old_wol_loop = """                    for interface in &interfaces {
+                        for ipv4 in &interface.ipv4 {"""
+    new_wol_loop = """                    for interface in &interfaces {
+                        #[cfg(not(target_os = "ios"))]
+                        if crate::common::is_virtual_or_tun_interface(interface) {
+                            continue;
+                        }
+                        for ipv4 in &interface.ipv4 {
+                            if hbb_common::config::is_tun_fake_ip(&IpAddr::V4(ipv4.addr)) {
+                                continue;
+                            }"""
+    if "if crate::common::is_virtual_or_tun_interface(interface)" in ltxt:
+        print("[rrremote] LAN send_wol virtual/TUN filter already patched in src/lan.rs.")
+    elif old_wol_loop in ltxt:
+        ltxt = ltxt.replace(old_wol_loop, new_wol_loop, 1)
+        lchanged = True
+        print("[rrremote] Filtered virtual/TUN interfaces in src/lan.rs::send_wol().")
+
+    if lchanged:
+        write_text(lan_rs, ltxt)
+
 
 def main() -> int:
     root = Path(sys.argv[1]).resolve() if len(sys.argv) > 1 else Path.cwd()
@@ -1537,6 +1957,7 @@ def main() -> int:
 
     patch_hbb_common_config(root, display_name, update_repo, rendezvous, pub_key, api_server)
     patch_macos_video_reliability(root)
+    patch_macos_input_reliability(root)
     patch_update_checker(root, update_repo, build_tag)
     patch_updater_artifact_resolver(root, update_repo)
     patch_default_api_server_fallback(root, api_server)
