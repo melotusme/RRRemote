@@ -52,7 +52,14 @@ fi
 STATE_DIR="${HOME}/Library/Application Support/RRRemote"
 STABLE_SCRIPT_DIR="${STATE_DIR}/scripts"
 VERSION_FILE="${STATE_DIR}/installed_tag.txt"
+DESIGNATED_REQ_FILE="${STATE_DIR}/designated_req.txt"
+LEGACY_TCC_MARKER="${STATE_DIR}/legacy_rustdesk_tcc_cleaned"
 mkdir -p "${STATE_DIR}"
+
+if [[ ! -f "${LEGACY_TCC_MARKER}" ]]; then
+  tccutil reset All com.carriez.rustdesk 2>/dev/null || true
+  touch "${LEGACY_TCC_MARKER}" 2>/dev/null || true
+fi
 
 TMP_DIR=""
 MOUNT_POINT=""
@@ -337,20 +344,37 @@ for item in data.get("artifacts", []):
   if [[ "${APP_NAME}" == "RRRemote.app" && -d "/Applications/RustDesk.app" ]]; then
     rm -rf "/Applications/RustDesk.app"
   fi
+
+  # Capture existing app's designated requirement before replacing so ad-hoc cdhash -> persistent
+  # certificate upgrades can clear stale TCC csreq rows once.
+  OLD_REQ=""
+  if [[ -d "${INSTALLED_APP}" ]]; then
+    OLD_REQ="$({ codesign -d -r- "${INSTALLED_APP}" 2>&1 || true; } | sed -n 's/^designated => //p' | head -n 1)"
+  fi
+  if [[ -z "${OLD_REQ}" && -f "${DESIGNATED_REQ_FILE}" ]]; then
+    OLD_REQ="$(cat "${DESIGNATED_REQ_FILE}" 2>/dev/null || true)"
+  fi
+
   rm -rf "${INSTALLED_APP}"
   ditto "${APP_SRC}" "${INSTALLED_APP}"
   xattr -dr com.apple.quarantine "${INSTALLED_APP}" 2>/dev/null || true
 
-  # Preserve valid CI/Developer ID signatures unless a local signing identity is configured,
-  # or if an ad-hoc bundle has Hardened Runtime enabled (which fails SIP dyld Team ID check).
+  # Preserve valid CI/Developer ID certificate signatures untouched unless --sign-identity was
+  # explicitly specified, or if an ad-hoc bundle has Hardened Runtime enabled (SIP dyld failure).
   EFFECTIVE_IDENTITY="$(detect_local_sign_identity)"
   CODESIGN_META="$(codesign -dv "${INSTALLED_APP}" 2>&1 || true)"
-  if [[ -n "${EFFECTIVE_IDENTITY}" ]]; then
-    echo "[rrremote] Signing ${INSTALLED_APP} inside-out with Keychain identity '${EFFECTIVE_IDENTITY}'..."
-    sign_app_inside_out "${INSTALLED_APP}" "${EFFECTIVE_IDENTITY}"
+  BUNDLE_REQ="$({ codesign -d -r- "${INSTALLED_APP}" 2>&1 || true; } | sed -n 's/^designated => //p' | head -n 1)"
+  if [[ -n "${SIGN_IDENTITY}" ]]; then
+    echo "[rrremote] Signing ${INSTALLED_APP} inside-out with requested Keychain identity '${SIGN_IDENTITY}'..."
+    sign_app_inside_out "${INSTALLED_APP}" "${SIGN_IDENTITY}"
   elif echo "${CODESIGN_META}" | grep -Eq 'flags=.*\(.*adhoc.*runtime'; then
     echo "[rrremote] Ad-hoc Hardened Runtime detected; re-signing inside-out without runtime for SIP dyld compatibility..."
     sign_app_inside_out "${INSTALLED_APP}" "-"
+  elif [[ "${BUNDLE_REQ}" == *"certificate leaf"* ]] && codesign --verify --deep --strict "${INSTALLED_APP}" >/dev/null 2>&1; then
+    echo "[rrremote] Preserving valid certificate-backed bundle signature on ${INSTALLED_APP}."
+  elif [[ -n "${EFFECTIVE_IDENTITY}" ]]; then
+    echo "[rrremote] Signing ${INSTALLED_APP} inside-out with Keychain identity '${EFFECTIVE_IDENTITY}'..."
+    sign_app_inside_out "${INSTALLED_APP}" "${EFFECTIVE_IDENTITY}"
   elif codesign --verify --deep --strict "${INSTALLED_APP}" >/dev/null 2>&1; then
     echo "[rrremote] Preserving valid bundle signature on ${INSTALLED_APP}."
   else
@@ -361,6 +385,17 @@ for item in data.get("artifacts", []):
 
   codesign --verify --deep --strict "${INSTALLED_APP}" || echo "[rrremote] WARNING: codesign verification reported issues on ${INSTALLED_APP}" >&2
 
+  NEW_REQ="$({ codesign -d -r- "${INSTALLED_APP}" 2>&1 || true; } | sed -n 's/^designated => //p' | head -n 1)"
+  if [[ -n "${NEW_REQ}" ]]; then
+    printf '%s\n' "${NEW_REQ}" > "${DESIGNATED_REQ_FILE}"
+  fi
+  if [[ -n "${OLD_REQ}" && "${OLD_REQ}" != "${NEW_REQ}" && "${OLD_REQ}" == *"cdhash"* ]]; then
+    echo "[rrremote] Code signing requirement changed from ad-hoc cdhash to persistent signature; resetting stale macOS TCC entries for com.carriez.rrremote..."
+    for tcc_svc in Accessibility ScreenCapture ListenEvent; do
+      tccutil reset "${tcc_svc}" com.carriez.rrremote 2>/dev/null || true
+    done
+  fi
+
   hdiutil detach "${MOUNT_POINT}" -quiet || true
   MOUNT_POINT=""
 
@@ -369,6 +404,12 @@ for item in data.get("artifacts", []):
   echo "[rrremote] Installed ${DESIRED_TAG}."
 else
   migrate_legacy_preferences
+  if [[ -d "${INSTALLED_APP}" && ! -f "${DESIGNATED_REQ_FILE}" ]]; then
+    NEW_REQ="$({ codesign -d -r- "${INSTALLED_APP}" 2>&1 || true; } | sed -n 's/^designated => //p' | head -n 1)"
+    if [[ -n "${NEW_REQ}" ]]; then
+      printf '%s\n' "${NEW_REQ}" > "${DESIGNATED_REQ_FILE}"
+    fi
+  fi
   echo "[rrremote] Already up to date (${DESIRED_TAG})."
 fi
 

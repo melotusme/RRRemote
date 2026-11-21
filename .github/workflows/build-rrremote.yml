@@ -747,6 +747,9 @@ jobs:
 
       - name: create unsigned dmg
         if: env.UPLOAD_ARTIFACT == 'true'
+        env:
+          RR_MACOS_SIGN_P12_BASE64: ${{ secrets.RR_MACOS_SIGN_P12_BASE64 }}
+          RR_MACOS_SIGN_P12_PASSWORD: ${{ secrets.RR_MACOS_SIGN_P12_PASSWORD }}
         run: |
           CREATE_DMG="$(command -v create-dmg)"
           CREATE_DMG="$(readlink -f "$CREATE_DMG")"
@@ -757,24 +760,84 @@ jobs:
           fi
           APP_BASENAME="$(basename "$APP_BUNDLE")"
           # build.py copies target/release/service into Contents/MacOS/ AFTER Xcode signs the app,
-          # breaking Xcode's bundle seal. Re-sign inside-out ad-hoc WITHOUT --options runtime
-          # (Hardened Runtime on TeamIdentifier=not-set ad-hoc bundles triggers dyld Team ID library
+          # breaking Xcode's bundle seal. Re-sign inside-out WITHOUT --options runtime
+          # (Hardened Runtime on TeamIdentifier=not-set bundles triggers dyld Team ID library
           # validation failure loading FlutterMacOS.framework on SIP-enabled macOS), while preserving
           # Release.entitlements (allow-jit, audio-input, network.client).
-          while IFS= read -r -d '' code; do
-            if file -b "$code" | grep -q 'Mach-O'; then
-              codesign --force --sign - "$code"
+          if [ -n "$RR_MACOS_SIGN_P12_BASE64" ] && [ -n "$RR_MACOS_SIGN_P12_PASSWORD" ]; then
+            echo "[rrremote] Signing $APP_BUNDLE with persistent RRRemote Release Signing certificate..."
+            P12_FILE="$RUNNER_TEMP/rr-sign.p12"
+            KEYCHAIN="$RUNNER_TEMP/rr-sign.keychain-db"
+            EXISTING_KEYCHAINS=()
+            while IFS= read -r kc_line; do
+              kc_clean="$(echo "$kc_line" | sed -e 's/^[[:space:]]*"*//' -e 's/"*[[:space:]]*$//')"
+              if [ -n "$kc_clean" ]; then
+                EXISTING_KEYCHAINS+=("$kc_clean")
+              fi
+            done < <(security list-keychains -d user)
+            cleanup_rr_sign() {
+              if [ "${#EXISTING_KEYCHAINS[@]}" -gt 0 ]; then
+                security list-keychains -d user -s "${EXISTING_KEYCHAINS[@]}" 2>/dev/null || true
+              fi
+              security delete-keychain "$KEYCHAIN" 2>/dev/null || true
+              rm -f "$KEYCHAIN" "$P12_FILE"
+            }
+            trap cleanup_rr_sign EXIT
+            rm -f "$P12_FILE" "$KEYCHAIN"
+            printf '%s' "$RR_MACOS_SIGN_P12_BASE64" | tr -d '\r\n ' | base64 --decode > "$P12_FILE" 2>/dev/null \
+              || printf '%s' "$RR_MACOS_SIGN_P12_BASE64" | tr -d '\r\n ' | base64 -D > "$P12_FILE"
+            KC_PASS="$(openssl rand -hex 24)"
+            security create-keychain -p "$KC_PASS" "$KEYCHAIN"
+            security set-keychain-settings -lut 21600 "$KEYCHAIN"
+            security unlock-keychain -p "$KC_PASS" "$KEYCHAIN"
+            security list-keychains -d user -s "$KEYCHAIN" "${EXISTING_KEYCHAINS[@]}"
+            security import "$P12_FILE" -k "$KEYCHAIN" -P "$RR_MACOS_SIGN_P12_PASSWORD" -T /usr/bin/codesign -T /usr/bin/security
+            security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KC_PASS" "$KEYCHAIN"
+            SIGN_ID="$(security find-identity -v -p codesigning "$KEYCHAIN" | awk '/"/ {print $2; exit}')"
+            if [ -z "$SIGN_ID" ]; then
+              SIGN_ID="$(security find-identity -p codesigning "$KEYCHAIN" | awk '/"/ {print $2; exit}')"
             fi
-          done < <(find "$APP_BUNDLE/Contents/Frameworks" -type f -print0)
-          while IFS= read -r -d '' framework; do
-            codesign --force --sign - "$framework"
-          done < <(find "$APP_BUNDLE/Contents/Frameworks" -depth -type d -name '*.framework' -print0)
-          if [ -f "$APP_BUNDLE/Contents/MacOS/service" ]; then
-            codesign --force --sign - "$APP_BUNDLE/Contents/MacOS/service"
+            if [ -z "$SIGN_ID" ]; then
+              echo "::error::Failed to find code signing identity in imported P12 keychain" >&2
+              exit 1
+            fi
+            while IFS= read -r -d '' code; do
+              if file -b "$code" | grep -q 'Mach-O'; then
+                codesign --force --keychain "$KEYCHAIN" --sign "$SIGN_ID" "$code"
+              fi
+            done < <(find "$APP_BUNDLE/Contents/Frameworks" -type f -print0)
+            while IFS= read -r -d '' framework; do
+              codesign --force --keychain "$KEYCHAIN" --sign "$SIGN_ID" "$framework"
+            done < <(find "$APP_BUNDLE/Contents/Frameworks" -depth -type d -name '*.framework' -print0)
+            if [ -f "$APP_BUNDLE/Contents/MacOS/service" ]; then
+              codesign --force --keychain "$KEYCHAIN" --sign "$SIGN_ID" "$APP_BUNDLE/Contents/MacOS/service"
+            fi
+            codesign --force --keychain "$KEYCHAIN" --sign "$SIGN_ID" --generate-entitlement-der \
+              --entitlements ./flutter/macos/Runner/Release.entitlements "$APP_BUNDLE"
+            codesign --verify --deep --strict --verbose=2 "$APP_BUNDLE"
+            if ! codesign -d -r- "$APP_BUNDLE" 2>&1 | grep -q 'certificate leaf ='; then
+              echo "::error::Expected persistent 'certificate leaf =' designated requirement on $APP_BUNDLE" >&2
+              codesign -d -r- "$APP_BUNDLE" >&2 || true
+              exit 1
+            fi
+            cleanup_rr_sign
+            trap - EXIT
+          else
+            while IFS= read -r -d '' code; do
+              if file -b "$code" | grep -q 'Mach-O'; then
+                codesign --force --sign - "$code"
+              fi
+            done < <(find "$APP_BUNDLE/Contents/Frameworks" -type f -print0)
+            while IFS= read -r -d '' framework; do
+              codesign --force --sign - "$framework"
+            done < <(find "$APP_BUNDLE/Contents/Frameworks" -depth -type d -name '*.framework' -print0)
+            if [ -f "$APP_BUNDLE/Contents/MacOS/service" ]; then
+              codesign --force --sign - "$APP_BUNDLE/Contents/MacOS/service"
+            fi
+            codesign --force --sign - --generate-entitlement-der \
+              --entitlements ./flutter/macos/Runner/Release.entitlements "$APP_BUNDLE"
+            codesign --verify --deep --strict --verbose=2 "$APP_BUNDLE"
           fi
-          codesign --force --sign - --generate-entitlement-der \
-            --entitlements ./flutter/macos/Runner/Release.entitlements "$APP_BUNDLE"
-          codesign --verify --deep --strict --verbose=2 "$APP_BUNDLE"
           actual_entitlements="$(codesign -d --entitlements :- "$APP_BUNDLE" 2>/dev/null)"
           audio_input="$(plutil -extract 'com\.apple\.security\.device\.audio-input' raw - <<<"$actual_entitlements")"
           if [ "$audio_input" != "true" ]; then

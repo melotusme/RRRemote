@@ -25,15 +25,108 @@ def patch_desktop_home_page(root: Path, update_repo: str) -> None:
     p = root / "flutter" / "lib" / "desktop" / "pages" / "desktop_home_page.dart"
     txt = read_text(p)
 
-    # 1. Add copied feedback flag for This Device ID card
+    # 1. Add copied feedback flag + live reactive macOS TCC permission RxBools in DesktopHomePage
     txt = replace_exact(
         txt,
         """  Timer? _updateTimer;
   bool isCardClosed = false;""",
         """  Timer? _updateTimer;
   bool isCardClosed = false;
-  final RxBool _idCopied = false.obs;""",
-        "Add _idCopied visual feedback state in DesktopHomePage",
+  final RxBool _idCopied = false.obs;
+  final RxBool _macCanScreen = false.obs;
+  final RxBool _macCanAcc = false.obs;
+  final RxBool _macCanInput = false.obs;
+  final RxBool _macHadGrantChange = false.obs;""",
+        "Add _idCopied and live macOS TCC RxBool state fields in DesktopHomePage",
+    )
+
+    # 1b. Initialize & unconditionally poll macOS TCC permissions every 1s in initState/_updateTimer
+    txt = replace_exact(
+        txt,
+        """  @override
+  void initState() {
+    super.initState();
+    _updateTimer = periodic_immediate(const Duration(seconds: 1), () async {
+      await gFFI.serverModel.fetchID();
+      final error = await bind.mainGetError();
+      if (systemError != error) {
+        systemError = error;
+        setState(() {});
+      }
+      final v = await mainGetBoolOption(kOptionStopService);
+      if (v != svcStopped.value) {
+        svcStopped.value = v;
+        setState(() {});
+      }
+      if (watchIsCanScreenRecording) {
+        if (bind.mainIsCanScreenRecording(prompt: false)) {
+          watchIsCanScreenRecording = false;
+          setState(() {});
+        }
+      }
+      if (watchIsProcessTrust) {
+        if (bind.mainIsProcessTrusted(prompt: false)) {
+          watchIsProcessTrust = false;
+          setState(() {});
+        }
+      }
+      if (watchIsInputMonitoring) {
+        if (bind.mainIsCanInputMonitoring(prompt: false)) {
+          watchIsInputMonitoring = false;
+          // Do not notify for now.
+          // Monitoring may not take effect until the process is restarted.
+          // rustDeskWinManager.call(
+          //     WindowType.RemoteDesktop, kWindowDisableGrabKeyboard, '');
+          setState(() {});
+        }
+      }""",
+        """  @override
+  void initState() {
+    super.initState();
+    if (isMacOS) {
+      _macCanScreen.value = bind.mainIsCanScreenRecording(prompt: false);
+      _macCanAcc.value = bind.mainIsProcessTrusted(prompt: false);
+      _macCanInput.value = bind.mainIsCanInputMonitoring(prompt: false);
+    }
+    _updateTimer = periodic_immediate(const Duration(seconds: 1), () async {
+      await gFFI.serverModel.fetchID();
+      final error = await bind.mainGetError();
+      if (systemError != error) {
+        systemError = error;
+        setState(() {});
+      }
+      final v = await mainGetBoolOption(kOptionStopService);
+      if (v != svcStopped.value) {
+        svcStopped.value = v;
+        setState(() {});
+      }
+      if (isMacOS) {
+        final nextScreen = bind.mainIsCanScreenRecording(prompt: false);
+        final nextAcc = bind.mainIsProcessTrusted(prompt: false);
+        final nextInput = bind.mainIsCanInputMonitoring(prompt: false);
+        var permChanged = false;
+        if (nextScreen != _macCanScreen.value) {
+          _macCanScreen.value = nextScreen;
+          _macHadGrantChange.value = true;
+          permChanged = true;
+        }
+        if (nextAcc != _macCanAcc.value) {
+          _macCanAcc.value = nextAcc;
+          permChanged = true;
+        }
+        if (nextInput != _macCanInput.value) {
+          _macCanInput.value = nextInput;
+          _macHadGrantChange.value = true;
+          permChanged = true;
+        }
+        if (nextScreen) watchIsCanScreenRecording = false;
+        if (nextAcc) watchIsProcessTrust = false;
+        if (nextInput) watchIsInputMonitoring = false;
+        if (permChanged && mounted) {
+          setState(() {});
+        }
+      }""",
+        "Poll macOS TCC permissions unconditionally every 1s in _DesktopHomePageState.initState",
     )
 
     # 2. Wrap DesktopHomePage.build with CallbackShortcuts + responsive LayoutBuilder (<720px collapse)
@@ -589,18 +682,21 @@ def patch_desktop_home_page(root: Path, update_repo: str) -> None:
       );
     }}
     if (isMacOS) {{
+      final canScreen = _macCanScreen.value;
+      final canAcc = _macCanAcc.value;
+      final canInput = _macCanInput.value;
+      final hadGrantChange = _macHadGrantChange.value;
       final isOutgoingOnly = bind.isOutgoingOnly();
-      final missingScreen =
-          !(isOutgoingOnly || bind.mainIsCanScreenRecording(prompt: false));
-      final missingAcc =
-          !isOutgoingOnly && !bind.mainIsProcessTrusted(prompt: false);
-      final missingInput = !bind.mainIsCanInputMonitoring(prompt: false);
+      final missingScreen = !(isOutgoingOnly || canScreen);
+      final missingAcc = !isOutgoingOnly && !canAcc;
+      final missingInput = !canInput;
       if (missingScreen || missingAcc || missingInput) {{
         return withUpdate(_buildMacTccChecklistCard(
           context,
           missingScreen: missingScreen,
           missingAcc: missingAcc,
           missingInput: missingInput,
+          hadGrantChange: hadGrantChange,
         ));
       }} else if (!isOutgoingOnly && svcStopped.value) {{
         return withUpdate(buildInstallCard(
@@ -857,33 +953,78 @@ def patch_desktop_home_page(root: Path, update_repo: str) -> None:
       ],
     );
   }""",
-        """  Widget _buildMacTccChecklistCard(
+        """  Future<void> _openPermGuide(String pane, {bool resetFirst = false}) async {
+    _macHadGrantChange.value = true;
+    try {
+      await kMacOSPermChannel.invokeMethod(
+        'openMacPermissionGuide',
+        <String, dynamic>{
+          'pane': pane,
+          'resetFirst': resetFirst,
+        },
+      );
+      return;
+    } catch (_) {
+      var target = pane;
+      if (target == 'auto') {
+        final isOutgoingOnly = bind.isOutgoingOnly();
+        if (!isOutgoingOnly && !_macCanScreen.value) {
+          target = 'screen';
+        } else if (!isOutgoingOnly && !_macCanAcc.value) {
+          target = 'accessibility';
+        } else {
+          target = 'input';
+        }
+      }
+      if (target == 'screen') {
+        bind.mainIsCanScreenRecording(prompt: true);
+        watchIsCanScreenRecording = true;
+        await launchUrl(Uri.parse(
+            'x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture'));
+      } else if (target == 'accessibility') {
+        bind.mainIsProcessTrusted(prompt: true);
+        watchIsProcessTrust = true;
+        await launchUrl(Uri.parse(
+            'x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility'));
+      } else {
+        bind.mainIsCanInputMonitoring(prompt: true);
+        watchIsInputMonitoring = true;
+        await launchUrl(Uri.parse(
+            'x-apple.systempreferences:com.apple.preference.security?Privacy_ListenEvent'));
+      }
+    }
+  }
+
+  Future<void> _resetStaleMacPermissions() async {
+    _macHadGrantChange.value = true;
+    try {
+      await kMacOSPermChannel.invokeMethod(
+        'resetMacPermission',
+        <String, dynamic>{'pane': 'all_missing'},
+      );
+    } catch (_) {}
+    await _openPermGuide('auto', resetFirst: true);
+  }
+
+  Future<void> _relaunchMacApp() async {
+    try {
+      await kMacOSPermChannel.invokeMethod('relaunchApp');
+    } catch (_) {}
+  }
+
+  Widget _buildMacTccChecklistCard(
     BuildContext context, {
     required bool missingScreen,
     required bool missingAcc,
     required bool missingInput,
+    bool hadGrantChange = false,
   }) {
     final c = RrColors.of(context);
-    void openScreen() {
-      bind.mainIsCanScreenRecording(prompt: true);
-      launchUrl(Uri.parse(
-          'x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture'));
-      watchIsCanScreenRecording = true;
-    }
-
-    void openAcc() {
-      bind.mainIsProcessTrusted(prompt: true);
-      launchUrl(Uri.parse(
-          'x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility'));
-      watchIsProcessTrust = true;
-    }
-
-    void openInput() {
-      bind.mainIsCanInputMonitoring(prompt: true);
-      launchUrl(Uri.parse(
-          'x-apple.systempreferences:com.apple.preference.security?Privacy_ListenEvent'));
-      watchIsInputMonitoring = true;
-    }
+    final bool isZh = Platform.localeName.toLowerCase().startsWith('zh') ||
+        translate('Settings') == '设置';
+    final Color primaryBtnFg = Theme.of(context).brightness == Brightness.dark
+        ? const Color(0xFF0B0E14)
+        : Colors.white;
 
     Widget permRow(
       String title,
@@ -892,9 +1033,9 @@ def patch_desktop_home_page(root: Path, update_repo: str) -> None:
       VoidCallback onOpen,
     ) {
       final rowContent = ConstrainedBox(
-        constraints: const BoxConstraints(minHeight: 32),
+        constraints: const BoxConstraints(minHeight: 34),
         child: Padding(
-          padding: const EdgeInsetsDirectional.fromSTEB(6, 4, 6, 4),
+          padding: const EdgeInsetsDirectional.fromSTEB(6, 5, 6, 5),
           child: Row(
             crossAxisAlignment: CrossAxisAlignment.center,
             children: [
@@ -949,9 +1090,11 @@ def patch_desktop_home_page(root: Path, update_repo: str) -> None:
         padding: const EdgeInsets.only(bottom: 4),
         child: Semantics(
           button: true,
-          label: 'Open System Settings for $title ($role)',
+          label: isZh
+              ? '打开系统设置授权 $title（$role）'
+              : 'Open System Settings for $title ($role)',
           child: Tooltip(
-            message: 'Open $title in System Settings',
+            message: isZh ? '点击打开「$title」悬浮拖拽授权' : 'Authorize $title with drag helper',
             child: Material(
               color: c.bgSurface,
               borderRadius: BorderRadius.circular(8),
@@ -964,16 +1107,6 @@ def patch_desktop_home_page(root: Path, update_repo: str) -> None:
           ),
         ),
       );
-    }
-
-    void openNextSettings() {
-      if (missingScreen) {
-        openScreen();
-      } else if (missingAcc) {
-        openAcc();
-      } else if (missingInput) {
-        openInput();
-      }
     }
 
     return Container(
@@ -989,59 +1122,139 @@ def patch_desktop_home_page(root: Path, update_repo: str) -> None:
         mainAxisSize: MainAxisSize.min,
         children: [
           Row(
+            crossAxisAlignment: CrossAxisAlignment.center,
             children: [
               Icon(Icons.warning_amber_rounded,
                   size: 16, color: c.warningText),
               const SizedBox(width: 6),
               Expanded(
                 child: Text(
-                  'macOS permissions required',
+                  isZh ? '需要开启 macOS 控制权限' : 'macOS permissions required',
                   style: RrText.label(c.warningText, weight: FontWeight.w600),
+                ),
+              ),
+              const SizedBox(width: 4),
+              Semantics(
+                button: true,
+                label: isZh ? '重置残留' : 'Reset stale',
+                child: Tooltip(
+                  message: isZh
+                      ? '清理旧版签名残留并重新打开悬浮授权向导'
+                      : 'Clear stale TCC entries and reopen drag helper',
+                  child: Material(
+                    color: Colors.transparent,
+                    borderRadius: BorderRadius.circular(6),
+                    child: InkWell(
+                      borderRadius: BorderRadius.circular(6),
+                      onTap: _resetStaleMacPermissions,
+                      child: ConstrainedBox(
+                        constraints: const BoxConstraints(minHeight: 28),
+                        child: Padding(
+                          padding: const EdgeInsets.symmetric(
+                              horizontal: 6, vertical: 4),
+                          child: Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              Icon(Icons.refresh_rounded,
+                                  size: 13, color: c.warningText),
+                              const SizedBox(width: 3),
+                              Text(
+                                isZh ? '重置残留' : 'Reset stale',
+                                style: RrText.caption(
+                                  c.warningText,
+                                  weight: FontWeight.w600,
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ),
+                    ),
+                  ),
                 ),
               ),
             ],
           ),
           const SizedBox(height: 8),
           permRow(
-            'Screen Recording',
-            'View screen',
+            isZh ? '屏幕录制' : 'Screen Recording',
+            isZh ? '允许远程查看此电脑画面' : 'View this Mac remotely',
             missingScreen,
-            openScreen,
+            () => _openPermGuide('screen'),
           ),
           permRow(
-            'Accessibility',
-            'Mouse & keyboard control',
+            isZh ? '辅助功能（设备控制）' : 'Accessibility (Device Control)',
+            isZh ? '允许远程鼠标点击与键盘输入' : 'Remote mouse & keyboard input',
             missingAcc,
-            openAcc,
+            () => _openPermGuide('accessibility'),
           ),
           permRow(
-            'Input Monitoring',
-            'Keyboard shortcuts',
+            isZh ? '输入监控' : 'Input Monitoring',
+            isZh ? '允许快捷键与组合键传输' : 'Keyboard shortcuts',
             missingInput,
-            openInput,
+            () => _openPermGuide('input'),
           ),
           const SizedBox(height: 4),
           Text(
-            'Quit and reopen RRRemote after granting permissions.',
+            isZh
+                ? '点击下方按钮将自动打开系统设置，并在下方弹出悬浮图标，直接拖入列表即可完成授权。'
+                : 'Opens System Settings with a floating RRRemote.app drag card right below the list.',
             style: RrText.caption(c.warningText, weight: FontWeight.w400),
           ),
           const SizedBox(height: 10),
           SizedBox(
             width: double.infinity,
-            height: 34,
-            child: OutlinedButton(
-              onPressed: openNextSettings,
-              style: OutlinedButton.styleFrom(
-                backgroundColor: c.bgSurface,
-                foregroundColor: c.warningText,
-                side: BorderSide(color: c.warningSolid, width: 1),
+            height: 36,
+            child: ElevatedButton(
+              onPressed: () => _openPermGuide('auto'),
+              style: ElevatedButton.styleFrom(
+                backgroundColor: c.warningSolid,
+                foregroundColor: primaryBtnFg,
+                elevation: 0,
+                padding: const EdgeInsets.symmetric(horizontal: 10),
                 shape: RoundedRectangleBorder(
                   borderRadius: BorderRadius.circular(8),
                 ),
               ),
-              child: Text(
-                'Open System Settings',
-                style: RrText.caption(c.warningText, weight: FontWeight.w600),
+              child: FittedBox(
+                fit: BoxFit.scaleDown,
+                child: Text(
+                  isZh ? '一键悬浮拖拽授权' : 'Authorize with Drag Helper',
+                  maxLines: 1,
+                  style: TextStyle(
+                    fontSize: 13,
+                    fontWeight: FontWeight.w600,
+                    color: primaryBtnFg,
+                  ),
+                ),
+              ),
+            ),
+          ),
+          const SizedBox(height: 6),
+          SizedBox(
+            width: double.infinity,
+            height: 32,
+            child: OutlinedButton(
+              onPressed: _relaunchMacApp,
+              style: OutlinedButton.styleFrom(
+                backgroundColor: c.bgSurface,
+                foregroundColor: c.warningText,
+                padding: const EdgeInsets.symmetric(horizontal: 8),
+                side: BorderSide(
+                  color: c.warningSolid,
+                  width: hadGrantChange ? 1.5 : 1.0,
+                ),
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(8),
+                ),
+              ),
+              child: FittedBox(
+                fit: BoxFit.scaleDown,
+                child: Text(
+                  isZh ? '已开启但未生效？点击重启应用' : 'Granted? Restart RRRemote to apply',
+                  maxLines: 1,
+                  style: RrText.caption(c.warningText, weight: FontWeight.w600),
+                ),
               ),
             ),
           ),
