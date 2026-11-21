@@ -128,15 +128,17 @@ sign_app_inside_out() {
     sign_opts+=(--options runtime --timestamp)
   fi
 
-  # 1. Sign nested libraries and frameworks first (never use deprecated --deep)
+  # 1. Sign nested Mach-O binaries and frameworks inside-out (never use deprecated --deep)
   if [[ -d "${app_path}/Contents/Frameworks" ]]; then
     while IFS= read -r -d '' bin; do
-      codesign "${sign_opts[@]}" "${bin}"
-    done < <(find "${app_path}/Contents/Frameworks" -type f \( -name "*.dylib" -o -name "*.so" \) -print0)
+      if file -b "${bin}" | grep -q 'Mach-O'; then
+        codesign "${sign_opts[@]}" "${bin}"
+      fi
+    done < <(find "${app_path}/Contents/Frameworks" -type f -print0)
 
     while IFS= read -r -d '' fw; do
       codesign "${sign_opts[@]}" "${fw}"
-    done < <(find "${app_path}/Contents/Frameworks" -maxdepth 2 -type d -name "*.framework" -print0)
+    done < <(find "${app_path}/Contents/Frameworks" -depth -type d -name "*.framework" -print0)
   fi
 
   # 2. Sign embedded service helper binary if present
@@ -145,7 +147,11 @@ sign_app_inside_out() {
   fi
 
   # 3. Sign main app bundle last, preserving entitlements
-  codesign "${sign_opts[@]}" "${ent_args[@]}" "${app_path}"
+  if [[ "${#ent_args[@]}" -gt 0 ]]; then
+    codesign "${sign_opts[@]}" --generate-entitlement-der "${ent_args[@]}" "${app_path}"
+  else
+    codesign "${sign_opts[@]}" "${app_path}"
+  fi
 }
 
 migrate_legacy_preferences() {
@@ -335,11 +341,16 @@ for item in data.get("artifacts", []):
   ditto "${APP_SRC}" "${INSTALLED_APP}"
   xattr -dr com.apple.quarantine "${INSTALLED_APP}" 2>/dev/null || true
 
-  # Preserve valid CI/Developer ID signatures unless a local signing identity is configured
+  # Preserve valid CI/Developer ID signatures unless a local signing identity is configured,
+  # or if an ad-hoc bundle has Hardened Runtime enabled (which fails SIP dyld Team ID check).
   EFFECTIVE_IDENTITY="$(detect_local_sign_identity)"
+  CODESIGN_META="$(codesign -dv "${INSTALLED_APP}" 2>&1 || true)"
   if [[ -n "${EFFECTIVE_IDENTITY}" ]]; then
     echo "[rrremote] Signing ${INSTALLED_APP} inside-out with Keychain identity '${EFFECTIVE_IDENTITY}'..."
     sign_app_inside_out "${INSTALLED_APP}" "${EFFECTIVE_IDENTITY}"
+  elif echo "${CODESIGN_META}" | grep -Eq 'flags=.*\(.*adhoc.*runtime'; then
+    echo "[rrremote] Ad-hoc Hardened Runtime detected; re-signing inside-out without runtime for SIP dyld compatibility..."
+    sign_app_inside_out "${INSTALLED_APP}" "-"
   elif codesign --verify --deep --strict "${INSTALLED_APP}" >/dev/null 2>&1; then
     echo "[rrremote] Preserving valid bundle signature on ${INSTALLED_APP}."
   else
@@ -395,7 +406,8 @@ fi
 
 # Never leave RRRemote dead if it was running before install/update/config (or after fresh install)
 if [[ -d "${INSTALLED_APP}" ]] && [[ "${WAS_RUNNING}" == "1" || "${APP_UPDATED}" == "1" ]]; then
-  if launchctl managername 2>/dev/null | grep -qi "Aqua"; then
+  CONSOLE_USER="$(stat -f '%Su' /dev/console 2>/dev/null || true)"
+  if launchctl managername 2>/dev/null | grep -qi "Aqua" || [[ "${CONSOLE_USER}" == "$(id -un)" ]]; then
     open -a "${INSTALLED_APP}" 2>/dev/null || true
     echo "[rrremote] Launched ${INSTALLED_APP}."
   fi

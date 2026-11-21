@@ -103,9 +103,15 @@ if ($CheckOnly) {
 }
 
 if ($currentTag -ne $tag) {
+    # Prefer native MSI over NSIS EXE so C:\Program Files\RRRemote\RRRemote.exe upgrades in-place cleanly
     $asset = $release.assets | Where-Object {
-        $_.name -match "(x86_64|x64).*\.(exe|msi)$" -and $_.name -notmatch "sciter|arm64"
+        $_.name -match "(x86_64|x64).*\.msi$" -and $_.name -notmatch "sciter|arm64"
     } | Select-Object -First 1
+    if (-not $asset) {
+        $asset = $release.assets | Where-Object {
+            $_.name -match "(x86_64|x64).*\.exe$" -and $_.name -notmatch "sciter|arm64"
+        } | Select-Object -First 1
+    }
 
     if (-not $asset) {
         throw "No Windows x86_64 installer asset found in release $($release.tag_name) of $usedRepo"

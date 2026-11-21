@@ -757,12 +757,30 @@ jobs:
           fi
           APP_BASENAME="$(basename "$APP_BUNDLE")"
           # build.py copies target/release/service into Contents/MacOS/ AFTER Xcode signs the app,
-          # breaking Xcode's bundle seal. Re-sign inside-out (Frameworks, service, and app bundle
-          # with hardened runtime + Release.entitlements) and verify before packaging the DMG.
-          bash ./.github/scripts/sign-macos-app.sh \
-            "$APP_BUNDLE" \
-            "-" \
-            ./flutter/macos/Runner/Release.entitlements
+          # breaking Xcode's bundle seal. Re-sign inside-out ad-hoc WITHOUT --options runtime
+          # (Hardened Runtime on TeamIdentifier=not-set ad-hoc bundles triggers dyld Team ID library
+          # validation failure loading FlutterMacOS.framework on SIP-enabled macOS), while preserving
+          # Release.entitlements (allow-jit, audio-input, network.client).
+          while IFS= read -r -d '' code; do
+            if file -b "$code" | grep -q 'Mach-O'; then
+              codesign --force --sign - "$code"
+            fi
+          done < <(find "$APP_BUNDLE/Contents/Frameworks" -type f -print0)
+          while IFS= read -r -d '' framework; do
+            codesign --force --sign - "$framework"
+          done < <(find "$APP_BUNDLE/Contents/Frameworks" -depth -type d -name '*.framework' -print0)
+          if [ -f "$APP_BUNDLE/Contents/MacOS/service" ]; then
+            codesign --force --sign - "$APP_BUNDLE/Contents/MacOS/service"
+          fi
+          codesign --force --sign - --generate-entitlement-der \
+            --entitlements ./flutter/macos/Runner/Release.entitlements "$APP_BUNDLE"
+          codesign --verify --deep --strict --verbose=2 "$APP_BUNDLE"
+          actual_entitlements="$(codesign -d --entitlements :- "$APP_BUNDLE" 2>/dev/null)"
+          audio_input="$(plutil -extract 'com\.apple\.security\.device\.audio-input' raw - <<<"$actual_entitlements")"
+          if [ "$audio_input" != "true" ]; then
+            echo "::error::Missing com.apple.security.device.audio-input entitlement on $APP_BUNDLE" >&2
+            exit 1
+          fi
           create-dmg --volname "RRRemote" --icon "$APP_BASENAME" 200 190 --hide-extension "$APP_BASENAME" --window-size 800 400 --app-drop-link 600 185 rrremote-${{ env.VERSION }}-${{ matrix.job.arch }}.dmg "$APP_BUNDLE"
 
       - name: Upload unsigned macOS app

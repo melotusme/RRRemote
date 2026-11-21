@@ -130,6 +130,11 @@ if [[ "${CURRENT_TAG}" != "${DESIRED_TAG}" ]]; then
   curl -fL "${ASSET_URL}" -o "${PKG_PATH}"
 
   if [[ "${PKG_TYPE}" == "arch" ]]; then
+    if pacman -Qi rustdesk >/dev/null 2>&1; then
+      sudo systemctl stop rustdesk.service 2>/dev/null || true
+      sudo systemctl disable rustdesk.service 2>/dev/null || true
+      sudo pacman -Rdd --noconfirm rustdesk
+    fi
     sudo pacman -U --noconfirm "${PKG_PATH}"
   else
     sudo apt-get install -y "${PKG_PATH}"
