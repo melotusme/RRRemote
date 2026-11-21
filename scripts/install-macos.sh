@@ -370,7 +370,7 @@ for item in data.get("artifacts", []):
   elif echo "${CODESIGN_META}" | grep -Eq 'flags=.*\(.*adhoc.*runtime'; then
     echo "[rrremote] Ad-hoc Hardened Runtime detected; re-signing inside-out without runtime for SIP dyld compatibility..."
     sign_app_inside_out "${INSTALLED_APP}" "-"
-  elif [[ "${BUNDLE_REQ}" == *"certificate leaf"* ]] && codesign --verify --deep --strict "${INSTALLED_APP}" >/dev/null 2>&1; then
+  elif [[ "${BUNDLE_REQ}" == *"certificate leaf"* || "${BUNDLE_REQ}" == *"certificate root"* ]] && codesign --verify --deep --strict "${INSTALLED_APP}" >/dev/null 2>&1; then
     echo "[rrremote] Preserving valid certificate-backed bundle signature on ${INSTALLED_APP}."
   elif [[ -n "${EFFECTIVE_IDENTITY}" ]]; then
     echo "[rrremote] Signing ${INSTALLED_APP} inside-out with Keychain identity '${EFFECTIVE_IDENTITY}'..."

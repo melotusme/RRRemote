@@ -815,8 +815,8 @@ jobs:
             codesign --force --keychain "$KEYCHAIN" --sign "$SIGN_ID" --generate-entitlement-der \
               --entitlements ./flutter/macos/Runner/Release.entitlements "$APP_BUNDLE"
             codesign --verify --deep --strict --verbose=2 "$APP_BUNDLE"
-            if ! codesign -d -r- "$APP_BUNDLE" 2>&1 | grep -q 'certificate leaf ='; then
-              echo "::error::Expected persistent 'certificate leaf =' designated requirement on $APP_BUNDLE" >&2
+            if ! codesign -d -r- "$APP_BUNDLE" 2>&1 | grep -Eq 'certificate (leaf|root) ='; then
+              echo "::error::Expected persistent 'certificate leaf/root =' designated requirement on $APP_BUNDLE" >&2
               codesign -d -r- "$APP_BUNDLE" >&2 || true
               exit 1
             fi
