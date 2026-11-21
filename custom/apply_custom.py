@@ -3,13 +3,20 @@
 Apply RRRemote customizations to a checked-out upstream RustDesk source tree:
 1. Disable account/login subsystem cleanly (`is_disable_account() -> true`) so no
    unwanted login/password screens appear (keeps Recent / Favorites / LAN Discovery).
-2. Replace upstream RustDesk icons & logos across all platforms (Windows/macOS/
-   Linux/Android/iOS/Tray) with the original RRRemote brand suite in `branding/`.
-3. Zero-rate-limit built-in updater via GitHub `/releases/latest` redirect +
+2. Configure single-user personal defaults in `hbb_common::config` (all session/host
+   permissions enabled out-of-the-box, adaptive view style, quality monitor, direct
+   LAN port 21118, and macOS software codec default to avoid VideoToolbox black screens).
+3. Enforce RFC 2544 TUN fake-IP (octets 198, 18/19) non-persistence, startup config
+   sanitization, and physical LAN interface fallback for NAT test & intranet listen.
+4. Harden macOS video encoding so any frame-1 hardware encoder error immediately
+   switches to software VP9/AV1 instead of stalling behind `refresh_allowed == false`.
+5. Replace upstream RustDesk icons, strings & metadata across all platforms with
+   the original RRRemote brand suite in `branding/`.
+6. Zero-rate-limit built-in updater via GitHub `/releases/latest` redirect +
    `-rrN` revision comparison + SHA256-verified `rrremote-update.json` manifest
-   so the app automatically downloads and installs updates upon launch.
-4. Optional build-time server defaults via environment variables (never in git).
-5. Industrial-grade UI & UX polish via `apply_ui_polish.py`.
+   (including `get_update_download_file_from_url`, Windows MSI/EXE & macOS root DMG).
+7. Optional build-time server defaults via environment variables (never in git).
+8. Industrial-grade UI & UX polish via `apply_ui_polish.py`.
 """
 
 from __future__ import annotations
@@ -30,7 +37,14 @@ def write_text(path: Path, content: str) -> None:
     path.write_text(content, encoding="utf-8", newline="\n")
 
 
-def patch_hbb_common_config(root: Path, display_name: str, rendezvous: str, pub_key: str, api_server: str) -> None:
+def patch_hbb_common_config(
+    root: Path,
+    display_name: str,
+    update_repo: str,
+    rendezvous: str,
+    pub_key: str,
+    api_server: str,
+) -> None:
     config_rs = root / "libs" / "hbb_common" / "src" / "config.rs"
     if not config_rs.exists():
         raise FileNotFoundError(f"Expected {config_rs} (ensure git submodules are checked out)")
@@ -72,6 +86,223 @@ def patch_hbb_common_config(root: Path, display_name: str, rendezvous: str, pub_
     else:
         raise RuntimeError("Failed to locate is_disable_account() in libs/hbb_common/src/config.rs")
 
+    # 2. Point documentation helper links to the RRRemote repository instead of rustdesk.com
+    repo_url = f"https://github.com/{update_repo}"
+    for old_doc, new_doc in (
+        (
+            'pub const LINK_DOCS_HOME: &str = "https://rustdesk.com/docs/en/";',
+            f'pub const LINK_DOCS_HOME: &str = "{repo_url}";',
+        ),
+        (
+            'pub const LINK_DOCS_X11_REQUIRED: &str = "https://rustdesk.com/docs/en/manual/linux/#x11-required";',
+            f'pub const LINK_DOCS_X11_REQUIRED: &str = "{repo_url}";',
+        ),
+    ):
+        if old_doc in content:
+            content = content.replace(old_doc, new_doc, 1)
+            changed = True
+
+    # 3. Single-user personal defaults in DEFAULT_SETTINGS / DEFAULT_DISPLAY_SETTINGS / DEFAULT_LOCAL_SETTINGS:
+    #    Enable all host & session permissions out-of-the-box, adaptive view style, quality monitor,
+    #    direct LAN access (port 21118), auto-update, and macOS software codec default ("enable-hwcodec" = "N").
+    old_defaults_block = (
+        "    pub static ref DEFAULT_SETTINGS: RwLock<HashMap<String, String>> = Default::default();\n"
+        "    pub static ref OVERWRITE_SETTINGS: RwLock<HashMap<String, String>> = Default::default();\n"
+        "    pub static ref DEFAULT_DISPLAY_SETTINGS: RwLock<HashMap<String, String>> = Default::default();\n"
+        "    pub static ref OVERWRITE_DISPLAY_SETTINGS: RwLock<HashMap<String, String>> = Default::default();\n"
+        "    pub static ref DEFAULT_LOCAL_SETTINGS: RwLock<HashMap<String, String>> = Default::default();"
+    )
+    new_defaults_block = """    pub static ref DEFAULT_SETTINGS: RwLock<HashMap<String, String>> = RwLock::new({
+        #[allow(unused_mut)]
+        let mut m = HashMap::from([
+            ("access-mode".to_owned(), "full".to_owned()),
+            ("enable-keyboard".to_owned(), "Y".to_owned()),
+            ("enable-clipboard".to_owned(), "Y".to_owned()),
+            ("enable-file-transfer".to_owned(), "Y".to_owned()),
+            ("enable-audio".to_owned(), "Y".to_owned()),
+            ("enable-tunnel".to_owned(), "Y".to_owned()),
+            ("enable-terminal".to_owned(), "Y".to_owned()),
+            ("enable-camera".to_owned(), "Y".to_owned()),
+            ("enable-remote-restart".to_owned(), "Y".to_owned()),
+            ("enable-record-session".to_owned(), "Y".to_owned()),
+            ("enable-remote-printer".to_owned(), "Y".to_owned()),
+            ("enable-block-input".to_owned(), "Y".to_owned()),
+            ("enable-privacy-mode".to_owned(), "Y".to_owned()),
+            ("enable-lan-discovery".to_owned(), "Y".to_owned()),
+            ("enable-abr".to_owned(), "Y".to_owned()),
+            ("allow-remote-config-modification".to_owned(), "Y".to_owned()),
+            ("allow-auto-update".to_owned(), "Y".to_owned()),
+            ("direct-server".to_owned(), "Y".to_owned()),
+            ("approve-mode".to_owned(), "password".to_owned()),
+            ("verification-method".to_owned(), "use-both-passwords".to_owned()),
+        ]);
+        #[cfg(target_os = "macos")]
+        m.insert("enable-hwcodec".to_owned(), "N".to_owned());
+        m
+    });
+    pub static ref OVERWRITE_SETTINGS: RwLock<HashMap<String, String>> = Default::default();
+    pub static ref DEFAULT_DISPLAY_SETTINGS: RwLock<HashMap<String, String>> = RwLock::new(HashMap::from([
+        ("view_style".to_owned(), "adaptive".to_owned()),
+        ("show_quality_monitor".to_owned(), "Y".to_owned()),
+        ("enable-file-copy-paste".to_owned(), "Y".to_owned()),
+        ("show_remote_cursor".to_owned(), "Y".to_owned()),
+        ("sync-init-clipboard".to_owned(), "Y".to_owned()),
+    ]));
+    pub static ref OVERWRITE_DISPLAY_SETTINGS: RwLock<HashMap<String, String>> = Default::default();
+    pub static ref DEFAULT_LOCAL_SETTINGS: RwLock<HashMap<String, String>> = RwLock::new(HashMap::from([
+        ("allow-remote-cm-modification".to_owned(), "Y".to_owned()),
+        ("enable-check-update".to_owned(), "Y".to_owned()),
+        ("allow-sync-clipboard-between-sessions".to_owned(), "Y".to_owned()),
+    ]));"""
+    if '"show_quality_monitor".to_owned()' in content and '"allow-remote-cm-modification".to_owned()' in content:
+        print("[rrremote] Personal permission & display defaults already configured in hbb_common::config.")
+    elif old_defaults_block in content:
+        content = content.replace(old_defaults_block, new_defaults_block, 1)
+        changed = True
+        print("[rrremote] Configured full personal permission & display defaults in hbb_common::config.")
+    else:
+        raise RuntimeError("Failed to locate DEFAULT_SETTINGS block in libs/hbb_common/src/config.rs")
+
+    # 3b. Default desktop UserDefaultConfig view_style to "adaptive" (matching mobile)
+    old_view_style = (
+        '            #[cfg(not(any(target_os = "android", target_os = "ios")))]\n'
+        '            keys::OPTION_VIEW_STYLE => self.get_string(key, "original", vec!["adaptive"]),'
+    )
+    new_view_style = (
+        '            #[cfg(not(any(target_os = "android", target_os = "ios")))]\n'
+        '            keys::OPTION_VIEW_STYLE => self.get_string(key, "adaptive", vec!["original"]),'
+    )
+    if new_view_style in content and old_view_style not in content:
+        print("[rrremote] Desktop OPTION_VIEW_STYLE already defaults to adaptive.")
+    elif old_view_style in content:
+        content = content.replace(old_view_style, new_view_style, 1)
+        changed = True
+        print("[rrremote] Defaulted desktop OPTION_VIEW_STYLE to adaptive.")
+    else:
+        raise RuntimeError("Failed to locate desktop OPTION_VIEW_STYLE in libs/hbb_common/src/config.rs")
+
+    # 3c. Ensure option2bool treats empty/unset enable-hwcodec on macOS as disabled (false)
+    old_opt2bool = (
+        "pub fn option2bool(option: &str, value: &str) -> bool {\n"
+        '    if option.starts_with("enable-") {'
+    )
+    new_opt2bool = (
+        "pub fn option2bool(option: &str, value: &str) -> bool {\n"
+        '    #[cfg(target_os = "macos")]\n'
+        '    if option == "enable-hwcodec" {\n'
+        '        return value == "Y";\n'
+        "    }\n"
+        '    if option.starts_with("enable-") {'
+    )
+    if 'if option == "enable-hwcodec"' in content:
+        print("[rrremote] macOS option2bool enable-hwcodec guard already present.")
+    elif old_opt2bool in content:
+        content = content.replace(old_opt2bool, new_opt2bool, 1)
+        changed = True
+        print("[rrremote] Defaulted macOS option2bool(enable-hwcodec) to false unless explicitly 'Y'.")
+    else:
+        raise RuntimeError("Failed to locate option2bool in libs/hbb_common/src/config.rs")
+
+    # 4. RFC 2544 TUN fake-IP (octets 198, 18/19) non-persistence & self-healing on Config2 load/save
+    tun_helpers = """#[inline]
+pub fn is_tun_fake_ip(ip: &std::net::IpAddr) -> bool {
+    if let std::net::IpAddr::V4(v4) = ip {
+        let oct = v4.octets();
+        oct[0] == 198 && (oct[1] == 18 || oct[1] == 19)
+    } else {
+        false
+    }
+}
+
+#[inline]
+pub fn is_tun_fake_ip_str(s: &str) -> bool {
+    s.trim()
+        .parse::<std::net::IpAddr>()
+        .map(|ip| is_tun_fake_ip(&ip))
+        .unwrap_or(false)
+}
+
+impl Config2 {"""
+    if "pub fn is_tun_fake_ip(" not in content:
+        if "impl Config2 {" not in content:
+            raise RuntimeError("Failed to locate `impl Config2 {` in libs/hbb_common/src/config.rs")
+        content = content.replace("impl Config2 {", tun_helpers, 1)
+        changed = True
+        print("[rrremote] Added RFC 2544 TUN fake-IP helpers in hbb_common::config.")
+
+    old_c2_load = (
+        "        let (unlock_pin, _, store2) =\n"
+        "            decrypt_str_or_original(&config.unlock_pin, PASSWORD_ENC_VERSION);\n"
+        "        config.unlock_pin = unlock_pin;\n"
+        "        store |= store2;\n"
+        "        if store {"
+    )
+    new_c2_load = (
+        "        let (unlock_pin, _, store2) =\n"
+        "            decrypt_str_or_original(&config.unlock_pin, PASSWORD_ENC_VERSION);\n"
+        "        config.unlock_pin = unlock_pin;\n"
+        "        store |= store2;\n"
+        "        if config\n"
+        "            .options\n"
+        '            .get("local-ip-addr")\n'
+        "            .is_some_and(|v| is_tun_fake_ip_str(v))\n"
+        "        {\n"
+        '            config.options.remove("local-ip-addr");\n'
+        "            store = true;\n"
+        "        }\n"
+        "        if store {"
+    )
+    if 'config.options.remove("local-ip-addr");' in content:
+        print("[rrremote] Config2::load TUN fake-IP sanitizer already applied.")
+    elif old_c2_load in content:
+        content = content.replace(old_c2_load, new_c2_load, 1)
+        changed = True
+        print("[rrremote] Added startup TUN fake-IP sanitizer in Config2::load.")
+    else:
+        raise RuntimeError("Failed to locate Config2::load unlock_pin block in libs/hbb_common/src/config.rs")
+
+    old_purify = (
+        "    fn purify_options(v: &mut HashMap<String, String>) {\n"
+        "        v.retain(|k, v| is_option_can_save(&OVERWRITE_SETTINGS, k, &DEFAULT_SETTINGS, v));\n"
+        "    }"
+    )
+    new_purify = (
+        "    fn purify_options(v: &mut HashMap<String, String>) {\n"
+        "        v.retain(|k, v| {\n"
+        '            !(k == "local-ip-addr" && is_tun_fake_ip_str(v))\n'
+        "                && is_option_can_save(&OVERWRITE_SETTINGS, k, &DEFAULT_SETTINGS, v)\n"
+        "        });\n"
+        "    }"
+    )
+    if '!(k == "local-ip-addr" && is_tun_fake_ip_str(v))' in content:
+        print("[rrremote] Config::purify_options TUN fake-IP guard already applied.")
+    elif old_purify in content:
+        content = content.replace(old_purify, new_purify, 1)
+        changed = True
+        print("[rrremote] Guarded Config::purify_options against persisting TUN fake-IPs.")
+    else:
+        raise RuntimeError("Failed to locate Config::purify_options in libs/hbb_common/src/config.rs")
+
+    old_set_opt = (
+        "    pub fn set_option(k: String, v: String) {\n"
+        "        if !is_option_can_save(&OVERWRITE_SETTINGS, &k, &DEFAULT_SETTINGS, &v) {"
+    )
+    new_set_opt = (
+        "    pub fn set_option(k: String, v: String) {\n"
+        '        if (k == "local-ip-addr" && is_tun_fake_ip_str(&v))\n'
+        "            || !is_option_can_save(&OVERWRITE_SETTINGS, &k, &DEFAULT_SETTINGS, &v)\n"
+        "        {"
+    )
+    if '(k == "local-ip-addr" && is_tun_fake_ip_str(&v))' in content:
+        print("[rrremote] Config::set_option TUN fake-IP guard already applied.")
+    elif old_set_opt in content:
+        content = content.replace(old_set_opt, new_set_opt, 1)
+        changed = True
+        print("[rrremote] Guarded Config::set_option against persisting TUN fake-IPs.")
+    else:
+        raise RuntimeError("Failed to locate Config::set_option in libs/hbb_common/src/config.rs")
+
+    # 5. Optional build-time server defaults via environment variables
     if rendezvous:
         new_content, count = re.subn(
             r'pub const RENDEZVOUS_SERVERS:\s*&\[&str\]\s*=\s*&\[[^\]]*\];',
@@ -113,6 +344,106 @@ def patch_hbb_common_config(root: Path, display_name: str, rendezvous: str, pub_
         write_text(config_rs, content)
 
 
+def patch_macos_video_reliability(root: Path) -> None:
+    """Eliminate macOS VideoToolbox RAM encode black screens via software default + frame-1 fallback."""
+    # 1. Default enable_hwcodec_option() on macOS to disabled unless explicitly set to "Y"
+    codec_rs = root / "libs" / "scrap" / "src" / "common" / "codec.rs"
+    if not codec_rs.exists():
+        raise FileNotFoundError(f"Expected {codec_rs}")
+    codec_txt = read_text(codec_rs)
+    old_hw_opt = """#[cfg(any(feature = "hwcodec", feature = "mediacodec"))]
+pub fn enable_hwcodec_option() -> bool {
+    use base::config::keys::OPTION_ENABLE_HWCODEC;
+
+    if !cfg!(target_os = "ios") {
+        return option2bool(
+            OPTION_ENABLE_HWCODEC,
+            &Config::get_option(OPTION_ENABLE_HWCODEC),
+        );
+    }
+    false
+}"""
+    new_hw_opt = """#[cfg(any(feature = "hwcodec", feature = "mediacodec"))]
+pub fn enable_hwcodec_option() -> bool {
+    use base::config::keys::OPTION_ENABLE_HWCODEC;
+
+    #[cfg(target_os = "macos")]
+    {
+        return Config::get_option(OPTION_ENABLE_HWCODEC) == "Y";
+    }
+    #[cfg(not(target_os = "macos"))]
+    if !cfg!(target_os = "ios") {
+        return option2bool(
+            OPTION_ENABLE_HWCODEC,
+            &Config::get_option(OPTION_ENABLE_HWCODEC),
+        );
+    }
+    #[cfg(not(target_os = "macos"))]
+    false
+}"""
+    if "return Config::get_option(OPTION_ENABLE_HWCODEC) == \"Y\";" in codec_txt:
+        print("[rrremote] macOS enable_hwcodec_option default already patched in libs/scrap/src/common/codec.rs.")
+    elif old_hw_opt in codec_txt:
+        codec_txt = codec_txt.replace(old_hw_opt, new_hw_opt, 1)
+        write_text(codec_rs, codec_txt)
+        print("[rrremote] Patched libs/scrap/src/common/codec.rs so macOS defaults to software VP9/AV1.")
+    else:
+        raise RuntimeError("Failed to locate enable_hwcodec_option in libs/scrap/src/common/codec.rs")
+
+    # 2. Ensure HwCodecConfig::clear initializes in-memory CONFIG before clearing ram_encode
+    #    so HwCodecConfig::get() never re-reads broken VideoToolbox encoders from _hwcodec cache.
+    hwcodec_rs = root / "libs" / "scrap" / "src" / "common" / "hwcodec.rs"
+    if not hwcodec_rs.exists():
+        raise FileNotFoundError(f"Expected {hwcodec_rs}")
+    hw_txt = read_text(hwcodec_rs)
+    old_clear = (
+        "            let mut c = CONFIG.lock().unwrap();\n"
+        "            if let Some(c) = c.as_mut() {"
+    )
+    new_clear = (
+        "            let _ = Self::get();\n"
+        "            let mut guard = CONFIG.lock().unwrap();\n"
+        "            let c = guard.get_or_insert_with(HwCodecConfig::default);\n"
+        "            {"
+    )
+    if "guard.get_or_insert_with(HwCodecConfig::default)" in hw_txt:
+        print("[rrremote] HwCodecConfig::clear cache guard already patched in libs/scrap/src/common/hwcodec.rs.")
+    elif old_clear in hw_txt:
+        hw_txt = hw_txt.replace(old_clear, new_clear, 1)
+        write_text(hwcodec_rs, hw_txt)
+        print("[rrremote] Hardened HwCodecConfig::clear in libs/scrap/src/common/hwcodec.rs.")
+    else:
+        raise RuntimeError("Failed to locate HwCodecConfig::clear in libs/scrap/src/common/hwcodec.rs")
+
+    # 3. In src/server/video_service.rs, VideoToolbox has latency_free() == false (repeat == true)
+    #    while refresh_allowed(false, false, false) == false on macOS, deadlocking static screen
+    #    updates when frame 1 fails with `RAM encode failed: -1`. Immediately disable & switch
+    #    hardware encoder on frame-1 error on macOS so VP9/AV1 renders immediately.
+    vs_rs = root / "src" / "server" / "video_service.rs"
+    if not vs_rs.exists():
+        raise FileNotFoundError(f"Expected {vs_rs}")
+    vs_txt = read_text(vs_rs)
+    old_switch = (
+        "            // repeat encoders can reach max_fail_times on the first frame\n"
+        "            if (first && !repeat) || *encode_fail_counter >= max_fail_times {"
+    )
+    new_switch = (
+        "            // repeat encoders can reach max_fail_times on the first frame;\n"
+        "            // on macOS refresh_allowed blocks static refreshes before warmup, so switch immediately on frame-1 hw failure.\n"
+        '            if (first && (!repeat || (cfg!(target_os = "macos") && encoder.is_hardware())))\n'
+        "                || *encode_fail_counter >= max_fail_times\n"
+        "            {"
+    )
+    if 'cfg!(target_os = "macos") && encoder.is_hardware()' in vs_txt:
+        print("[rrremote] macOS frame-1 hardware encoder fallback already patched in src/server/video_service.rs.")
+    elif old_switch in vs_txt:
+        vs_txt = vs_txt.replace(old_switch, new_switch, 1)
+        write_text(vs_rs, vs_txt)
+        print("[rrremote] Added immediate frame-1 VideoToolbox -> VP9/AV1 fallback in src/server/video_service.rs.")
+    else:
+        raise RuntimeError("Failed to locate handle_one_frame switch condition in src/server/video_service.rs")
+
+
 def patch_update_checker(root: Path, update_repo: str, build_tag: str) -> None:
     """Redirect built-in update check to GitHub `/releases/latest` with -rrN revision support."""
     if "/" not in update_repo:
@@ -124,6 +455,26 @@ def patch_update_checker(root: Path, update_repo: str, build_tag: str) -> None:
         raise FileNotFoundError(f"Expected {common_rs}")
 
     content = read_text(common_rs)
+
+    # 0. Enable startup check_software_update() even though APP_NAME != "RustDesk" (is_custom_client() == true)
+    old_check_sw = (
+        "pub fn check_software_update() {\n"
+        "    if is_custom_client() {\n"
+        "        return;\n"
+        "    }\n"
+        "    let opt = LocalConfig::get_option(keys::OPTION_ENABLE_CHECK_UPDATE);"
+    )
+    new_check_sw = (
+        "pub fn check_software_update() {\n"
+        "    let opt = LocalConfig::get_option(keys::OPTION_ENABLE_CHECK_UPDATE);"
+    )
+    if old_check_sw in content:
+        content = content.replace(old_check_sw, new_check_sw, 1)
+        print("[rrremote] Enabled startup check_software_update() for RRRemote custom client.")
+    elif new_check_sw in content:
+        print("[rrremote] Startup check_software_update() already enabled.")
+    else:
+        raise RuntimeError("Failed to locate check_software_update() in src/common.rs")
 
     # 1. Allow update URLs from our custom GitHub repository in release_id_from_update_url
     old_match = (
@@ -273,17 +624,20 @@ fn process_software_update_check_response(bytes: Bytes) -> ResultType<()> {{
 
 
 def patch_updater_artifact_resolver(root: Path, update_repo: str) -> None:
-    """Resolve platform installers from rrremote-update.json on GitHub Releases with SHA256."""
+    """Resolve & download platform installers from rrremote-update.json on GitHub Releases with SHA256."""
+    if "/" not in update_repo:
+        raise ValueError(f"Invalid UPDATE_REPO: {update_repo!r}, expected 'owner/repo'")
+    owner, repo = update_repo.split("/", 1)
+
     artifact_rs = root / "src" / "updater" / "artifact.rs"
     if not artifact_rs.exists():
         raise FileNotFoundError(f"Expected {artifact_rs}")
 
     content = read_text(artifact_rs)
-    if "rrremote-update.json" in content:
-        print("[rrremote] src/updater/artifact.rs already patched for rrremote-update.json.")
-        return
+    artifact_changed = False
 
-    old_fn = '''pub(super) fn verified_update_artifact_from_release_page_url(
+    if "rrremote-update.json" not in content:
+        old_fn = '''pub(super) fn verified_update_artifact_from_release_page_url(
     update_url: &str,
     query: &UpdateArtifactQuery<'_>,
 ) -> ResultType<VerifiedUpdateArtifact> {
@@ -304,7 +658,7 @@ def patch_updater_artifact_resolver(root: Path, update_repo: str) -> None:
     crate::update_metadata::verify_update_metadata(&metadata_bytes, &signature_bytes, requirements)
 }'''
 
-    new_fn = f'''#[derive(serde_derive::Deserialize)]
+        new_fn = f'''#[derive(serde_derive::Deserialize)]
 struct RrManifest {{
     version: String,
     artifacts: Vec<RrManifestArtifact>,
@@ -356,32 +710,87 @@ pub(super) fn verified_update_artifact_from_release_page_url(
     }})
 }}'''
 
-    if old_fn not in content:
-        raise RuntimeError("Failed to match verified_update_artifact_from_release_page_url in src/updater/artifact.rs")
+        if old_fn not in content:
+            raise RuntimeError("Failed to match verified_update_artifact_from_release_page_url in src/updater/artifact.rs")
 
-    content = content.replace(old_fn, new_fn, 1)
-    # Silence unused import warning for UpdateMetadataRequirements
-    content = content.replace(
-        "update_metadata::{UpdateArtifactQuery, UpdateMetadataRequirements, VerifiedUpdateArtifact},",
-        "update_metadata::{UpdateArtifactQuery, VerifiedUpdateArtifact},",
-        1,
+        content = content.replace(old_fn, new_fn, 1)
+        content = content.replace(
+            "update_metadata::{UpdateArtifactQuery, UpdateMetadataRequirements, VerifiedUpdateArtifact},",
+            "update_metadata::{UpdateArtifactQuery, VerifiedUpdateArtifact},",
+            1,
+        )
+        artifact_changed = True
+        print(f"[rrremote] Wired SHA256-verified in-app update manifest resolver for {update_repo}.")
+    else:
+        print("[rrremote] src/updater/artifact.rs already patched for rrremote-update.json.")
+
+    # Allow downloading verified release assets from melotusme/RRRemote in get_update_download_file_from_url
+    old_dl_guard = (
+        '    if owner != "rustdesk"\n'
+        '        || repo != "rustdesk"'
     )
-    write_text(artifact_rs, content)
-    print(f"[rrremote] Wired SHA256-verified in-app update manifest resolver for {update_repo}.")
+    new_dl_guard = (
+        f'    if !((owner == "{owner}" && repo == "{repo}") || (owner == "rustdesk" && repo == "rustdesk"))'
+    )
+    if f'owner == "{owner}" && repo == "{repo}"' in content:
+        print(f"[rrremote] get_update_download_file_from_url already accepts {owner}/{repo}.")
+    elif old_dl_guard in content:
+        content = content.replace(old_dl_guard, new_dl_guard, 1)
+        artifact_changed = True
+        print(f"[rrremote] Allowed {owner}/{repo} asset URLs in get_update_download_file_from_url.")
+    else:
+        raise RuntimeError("Failed to locate get_update_download_file_from_url guard in src/updater/artifact.rs")
+
+    if artifact_changed:
+        write_text(artifact_rs, content)
+
+    # Enable silent macOS root DMG updates and native Windows MSI updates in src/updater.rs & src/flutter_ffi.rs
+    updater_rs = root / "src" / "updater.rs"
+    if updater_rs.exists():
+        utxt = read_text(updater_rs)
+        uchanged = False
+        old_root_skip = (
+            "    if crate::is_custom_client() {\n"
+            '        log::info!("[root-update] Custom client detected, skipping stock update.");\n'
+            "        return Ok(false);\n"
+            "    }\n"
+        )
+        if old_root_skip in utxt:
+            utxt = utxt.replace(old_root_skip, "", 1)
+            uchanged = True
+            print("[rrremote] Enabled macOS silent root DMG auto-update in src/updater.rs.")
+        old_umsi = "let update_msi = crate::platform::is_msi_installed()? && !crate::is_custom_client();"
+        new_umsi = "let update_msi = crate::platform::is_msi_installed()?;"
+        if old_umsi in utxt:
+            utxt = utxt.replace(old_umsi, new_umsi, 1)
+            uchanged = True
+            print("[rrremote] Enabled native MSI update format resolution in src/updater.rs.")
+        if uchanged:
+            write_text(updater_rs, utxt)
+
+    ffi_rs = root / "src" / "flutter_ffi.rs"
+    if ffi_rs.exists():
+        ftxt = read_text(ffi_rs)
+        old_fmsi = "let update_msi = crate::platform::windows::is_msi_installed()? && !crate::is_custom_client();"
+        new_fmsi = "let update_msi = crate::platform::windows::is_msi_installed()?;"
+        if old_fmsi in ftxt:
+            ftxt = ftxt.replace(old_fmsi, new_fmsi, 1)
+            write_text(ffi_rs, ftxt)
+            print("[rrremote] Enabled native MSI update format resolution in src/flutter_ffi.rs.")
 
 
 def patch_default_api_server_fallback(root: Path, api_server: str) -> None:
     common_rs = root / "src" / "common.rs"
     content = read_text(common_rs)
     if api_server:
-        marker = 'pub fn get_api_server(api: String, custom: String) -> String {'
+        marker = "pub fn get_api_server(api: String, custom: String) -> String {"
         if marker in content and "RRREMOTE_DEFAULT_API_SERVER" not in content:
             idx = content.index(marker)
             snippet = content[idx : idx + 1200]
             if 'return "".to_owned();' in snippet:
                 patched_snippet = snippet.replace(
                     'return "".to_owned();',
-                    'return hbb_common::config::RRREMOTE_DEFAULT_API_SERVER.to_owned();',
+                    "return hbb_common::config::RRREMOTE_DEFAULT_API_SERVER.to_owned();",
                     1,
                 )
                 content = content[:idx] + patched_snippet + content[idx + 1200 :]
@@ -473,11 +882,12 @@ def apply_brand_icons(root: Path) -> None:
             print("[rrremote] Pillow not installed on runner; skipping mobile PNG resizing.")
 
 
-def patch_display_branding(root: Path, display_name: str) -> None:
+def patch_display_branding(root: Path, display_name: str, update_repo: str) -> None:
     if not display_name or display_name == "RustDesk":
         return
 
     lower_name = display_name.lower()
+    repo_url = f"https://github.com/{update_repo}"
 
     # 1. Flutter Dart window title
     flutter_main = root / "flutter" / "lib" / "main.dart"
@@ -502,6 +912,46 @@ def patch_display_branding(root: Path, display_name: str) -> None:
             txt = txt.replace(old_lang_guard, new_lang_guard, 1)
             write_text(lang_rs, txt)
             print(f"[rrremote] Enabled 100% i18n RustDesk -> {display_name} substitution in src/lang.rs.")
+
+    # 2b. Replace remaining user-visible RustDesk literals in Rust core modules
+    auth_2fa = root / "src" / "auth_2fa.rs"
+    if auth_2fa.exists():
+        txt = read_text(auth_2fa)
+        updated = txt.replace('const ISSUER: &str = "RustDesk";', f'const ISSUER: &str = "{display_name}";')
+        if updated != txt:
+            write_text(auth_2fa, updated)
+            print(f"[rrremote] Updated 2FA TOTP issuer to {display_name} in src/auth_2fa.rs.")
+
+    wayland_rs = root / "src" / "server" / "wayland.rs"
+    if wayland_rs.exists():
+        txt = read_text(wayland_rs)
+        updated = (
+            txt.replace("RustDesk cannot reach", f"{display_name} cannot reach")
+            .replace("that RustDesk can use it", f"that {display_name} can use it")
+            .replace("RustDesk could not", f"{display_name} could not")
+        )
+        if updated != txt:
+            write_text(wayland_rs, updated)
+            print(f"[rrremote] Updated user-visible Wayland error messages to {display_name}.")
+
+    uinput_rs = root / "src" / "server" / "uinput.rs"
+    if uinput_rs.exists():
+        txt = read_text(uinput_rs)
+        updated = txt.replace("RustDesk UInput", f"{display_name} UInput")
+        if updated != txt:
+            write_text(uinput_rs, updated)
+            print(f"[rrremote] Updated Linux UInput virtual device names to {display_name}.")
+
+    client_rs = root / "src" / "client.rs"
+    if client_rs.exists():
+        txt = read_text(client_rs)
+        updated = txt.replace(
+            'pub const SCRAP_X11_REF_URL: &str = "https://rustdesk.com/docs/en/manual/linux/#x11-required";',
+            f'pub const SCRAP_X11_REF_URL: &str = "{repo_url}";',
+        )
+        if updated != txt:
+            write_text(client_rs, updated)
+            print(f"[rrremote] Updated SCRAP_X11_REF_URL in src/client.rs to {repo_url}.")
 
     # 3. Windows binary name (RRRemote.exe), runner title & file version metadata
     win_cmake = root / "flutter" / "windows" / "CMakeLists.txt"
@@ -529,7 +979,7 @@ def patch_display_branding(root: Path, display_name: str) -> None:
             .replace('VALUE "InternalName", "rustdesk"', f'VALUE "InternalName", "{display_name}"')
             .replace('VALUE "OriginalFilename", "rustdesk.exe"', f'VALUE "OriginalFilename", "{display_name}.exe"')
             .replace('VALUE "ProductName", "RustDesk"', f'VALUE "ProductName", "{display_name}"')
-            .replace('Copyright © 2026 Purslane Tech Pte. Ltd.', f'Copyright © 2026 {display_name}.')
+            .replace("Copyright © 2026 Purslane Tech Pte. Ltd.", f"Copyright © 2026 {display_name}.")
         )
         if updated != txt:
             write_text(win_rc, updated)
@@ -737,7 +1187,7 @@ post_remove() {{
             txt = read_text(sp)
             updated = (
                 txt.replace("Name:       rustdesk", f"Name:       {lower_name}")
-                .replace("URL:        https://rustdesk.com", "URL:        https://github.com/melotusme/RRRemote")
+                .replace("URL:        https://rustdesk.com", f"URL:        {repo_url}")
                 .replace("Vendor:     rustdesk <info@rustdesk.com>", f"Vendor:     {display_name}")
                 .replace("/usr/share/rustdesk", f"/usr/share/{lower_name}")
                 .replace("/usr/bin/rustdesk", f"/usr/bin/{lower_name}")
@@ -782,20 +1232,23 @@ post_remove() {{
             )
             .replace("Package: rustdesk", f"Package: {lower_name}")
             .replace("Maintainer: rustdesk <info@rustdesk.com>", f"Maintainer: {display_name}")
-            .replace("Homepage: https://rustdesk.com", "Homepage: https://github.com/melotusme/RRRemote")
+            .replace("Homepage: https://rustdesk.com", f"Homepage: {repo_url}")
+            .replace(
+                "cp ../res/rustdesk.service tmpdeb/usr/share/rustdesk/files/systemd/",
+                f"cp ../res/rustdesk.service tmpdeb/usr/share/{lower_name}/files/systemd/{lower_name}.service",
+            )
             .replace("tmpdeb/usr/share/rustdesk/rustdesk", f"tmpdeb/usr/share/{lower_name}/{lower_name}")
             .replace("tmpdeb/usr/share/rustdesk", f"tmpdeb/usr/share/{lower_name}")
             .replace("tmpdeb/usr/bin/rustdesk", f"tmpdeb/usr/bin/{lower_name}")
-            .replace(
-                f"cp ../res/rustdesk.service tmpdeb/usr/share/{lower_name}/files/systemd/",
-                f"cp ../res/rustdesk.service tmpdeb/usr/share/{lower_name}/files/systemd/{lower_name}.service",
-            )
             .replace("apps/rustdesk.png", f"apps/{lower_name}.png")
             .replace("apps/rustdesk.svg", f"apps/{lower_name}.svg")
             .replace("applications/rustdesk.desktop", f"applications/{lower_name}.desktop")
             .replace("applications/rustdesk-link.desktop", f"applications/{lower_name}-link.desktop")
             .replace("dpkg-deb -b tmpdeb rustdesk.deb;", f"dpkg-deb -b tmpdeb {lower_name}.deb;")
-            .replace("os.rename('rustdesk.deb', '../rustdesk-%s.deb' % version)", f"os.rename('{lower_name}.deb', '../{lower_name}-%s.deb' % version)")
+            .replace(
+                "os.rename('rustdesk.deb', '../rustdesk-%s.deb' % version)",
+                f"os.rename('{lower_name}.deb', '../{lower_name}-%s.deb' % version)",
+            )
         )
         if updated != txt:
             write_text(build_py, updated)
@@ -844,17 +1297,18 @@ post_remove() {{
 
 
 def patch_personal_ergonomics(root: Path) -> None:
-    """Apply personal-use zero-password auto-approve (key-gated) and TUN fake-IP immunity."""
+    """Apply personal-use zero-password auto-approve (key-gated) and full TUN fake-IP LAN immunity."""
     # 1. Personal zero-password auto-approve on private key-authenticated self-hosted servers:
     #    When the host has a custom server Ed25519 `key` configured (so only devices with the
     #    owner's private key can reach it via hbbs/hbbr) and approve-mode is not explicitly
     #    set to "click", immediately authorize incoming sessions without prompting for a password.
     conn_rs = root / "src" / "server" / "connection.rs"
-    if conn_rs.exists():
-        txt = read_text(conn_rs)
-        old_auth = """            if (password::approve_mode() == ApproveMode::Click && !allow_logon_screen_password)
+    if not conn_rs.exists():
+        raise FileNotFoundError(f"Expected {conn_rs}")
+    txt = read_text(conn_rs)
+    old_auth = """            if (password::approve_mode() == ApproveMode::Click && !allow_logon_screen_password)
                 || password::approve_mode() == ApproveMode::Both && !password::has_valid_password()"""
-        new_auth = """            if !Config::get_option("key").is_empty()
+    new_auth = """            if !Config::get_option("key").is_empty()
                 && Config::get_option("approve-mode") != "click"
             {
                 if !self.send_logon_response_and_keep_alive().await {
@@ -863,52 +1317,213 @@ def patch_personal_ergonomics(root: Path) -> None:
                 self.try_start_cm(lr.my_id.clone(), lr.my_name.clone(), self.authorized);
             } else if (password::approve_mode() == ApproveMode::Click && !allow_logon_screen_password)
                 || password::approve_mode() == ApproveMode::Both && !password::has_valid_password()"""
-        if new_auth in txt:
-            print("[rrremote] Personal key-gated auto-approve already patched in src/server/connection.rs.")
-        elif old_auth in txt:
-            txt = txt.replace(old_auth, new_auth, 1)
-            write_text(conn_rs, txt)
-            print("[rrremote] Enabled key-gated zero-password auto-approve in src/server/connection.rs.")
-        else:
-            raise RuntimeError("Failed to locate login approve block in src/server/connection.rs")
+    if new_auth in txt:
+        print("[rrremote] Personal key-gated auto-approve already patched in src/server/connection.rs.")
+    elif old_auth in txt:
+        txt = txt.replace(old_auth, new_auth, 1)
+        write_text(conn_rs, txt)
+        print("[rrremote] Enabled key-gated zero-password auto-approve in src/server/connection.rs.")
+    else:
+        raise RuntimeError("Failed to locate login approve block in src/server/connection.rs")
 
-    # 2. TUN fake-IP (RFC 2544 benchmarking range, octets 198.18/19) immunity in handle_intranet_:
-    #    When Clash Verge / Shadowrocket / sing-box TUN mode routes the rendezvous server through
-    #    a virtual TUN interface, binding a LAN listener on the virtual TUN IP causes every
-    #    intranet connection to time out. Skip intranet listen on RFC 2544 TUN IPs so handle_intranet
-    #    falls back cleanly to relay/P2P immediately.
+    # 2. Physical non-TUN LAN IPv4 resolver + test_nat_type_() local-ip-addr guard in src/common.rs:
+    #    When Clash Verge / Shadowrocket / sing-box TUN mode routes hbbs over utun, socket.local_addr()
+    #    carries an RFC 2544 TUN fake-IP (octets 198, 18/19). Resolve a physical private LAN IPv4 via
+    #    default_net::get_interfaces() instead of polluting local-ip-addr.
+    common_rs = root / "src" / "common.rs"
+    if not common_rs.exists():
+        raise FileNotFoundError(f"Expected {common_rs}")
+    ctxt = read_text(common_rs)
+    cchanged = False
+
+    lan_helper = """pub fn resolve_non_tun_lan_ipv4() -> Option<std::net::Ipv4Addr> {
+    #[cfg(target_os = "ios")]
+    {
+        None
+    }
+    #[cfg(not(target_os = "ios"))]
+    {
+        let mut fallback: Option<std::net::Ipv4Addr> = None;
+        for interface in default_net::get_interfaces() {
+            let lname = interface.name.to_ascii_lowercase();
+            let is_virtual_if = lname.starts_with("utun")
+                || lname.starts_with("tun")
+                || lname.starts_with("tap")
+                || lname.starts_with("wg")
+                || lname.starts_with("tailscale")
+                || lname.starts_with("docker")
+                || lname.starts_with("veth")
+                || lname.starts_with("br-")
+                || lname.starts_with("vmnet")
+                || lname.starts_with("vboxnet")
+                || lname.starts_with("lo");
+            if is_virtual_if {
+                continue;
+            }
+            let has_hw_mac = interface
+                .mac_addr
+                .as_ref()
+                .map(|m| {
+                    let s = m.address();
+                    !s.is_empty() && s.bytes().any(|b| b != b'0' && b != b':' && b != b'-')
+                })
+                .unwrap_or(false);
+            for ipv4 in &interface.ipv4 {
+                let addr = ipv4.addr;
+                if addr.is_loopback()
+                    || addr.is_unspecified()
+                    || addr.is_link_local()
+                    || hbb_common::config::is_tun_fake_ip(&std::net::IpAddr::V4(addr))
+                {
+                    continue;
+                }
+                if addr.is_private() {
+                    if has_hw_mac {
+                        return Some(addr);
+                    }
+                    if fallback.is_none() {
+                        fallback = Some(addr);
+                    }
+                }
+            }
+        }
+        fallback
+    }
+}
+
+#[tokio::main(flavor = "current_thread")]
+async fn test_nat_type_() -> ResultType<bool> {"""
+    nat_marker = '#[tokio::main(flavor = "current_thread")]\nasync fn test_nat_type_() -> ResultType<bool> {'
+    if "pub fn resolve_non_tun_lan_ipv4()" not in ctxt:
+        if nat_marker not in ctxt:
+            raise RuntimeError("Failed to locate test_nat_type_() in src/common.rs")
+        ctxt = ctxt.replace(nat_marker, lan_helper, 1)
+        cchanged = True
+        print("[rrremote] Added resolve_non_tun_lan_ipv4() helper in src/common.rs.")
+
+    old_nat_ip = """        if i == 0 {
+            // reuse the local addr is required for nat test
+            local_addr = Some(socket.local_addr());
+            Config::set_option(
+                "local-ip-addr".to_owned(),
+                socket.local_addr().ip().to_string(),
+            );
+        }"""
+    new_nat_ip = """        if i == 0 {
+            // reuse the local addr is required for nat test
+            local_addr = Some(socket.local_addr());
+            let detected_ip = socket.local_addr().ip();
+            if hbb_common::config::is_tun_fake_ip(&detected_ip) {
+                if let Some(lan_v4) = resolve_non_tun_lan_ipv4() {
+                    Config::set_option("local-ip-addr".to_owned(), lan_v4.to_string());
+                } else {
+                    Config::set_option("local-ip-addr".to_owned(), String::new());
+                }
+            } else {
+                Config::set_option("local-ip-addr".to_owned(), detected_ip.to_string());
+            }
+        }"""
+    if "if hbb_common::config::is_tun_fake_ip(&detected_ip)" in ctxt:
+        print("[rrremote] test_nat_type_() TUN fake-IP guard already patched in src/common.rs.")
+    elif old_nat_ip in ctxt:
+        ctxt = ctxt.replace(old_nat_ip, new_nat_ip, 1)
+        cchanged = True
+        print("[rrremote] Protected test_nat_type_() local-ip-addr from RFC 2544 TUN fake-IPs.")
+    else:
+        raise RuntimeError("Failed to locate test_nat_type_() local-ip-addr block in src/common.rs")
+
+    if cchanged:
+        write_text(common_rs, ctxt)
+
+    # 3. TUN fake-IP LAN direct listener fallback in src/rendezvous_mediator.rs (handle_intranet_):
+    #    When hbbs is routed via TUN, bind a direct LAN TCP listener on our physical LAN IPv4
+    #    so same-LAN devices still connect directly in <5ms instead of timing out on TUN IP.
     med_rs = root / "src" / "rendezvous_mediator.rs"
-    if med_rs.exists():
-        txt = read_text(med_rs)
-        old_local = """        let local_addr = socket.local_addr();
+    if not med_rs.exists():
+        raise FileNotFoundError(f"Expected {med_rs}")
+    mtxt = read_text(med_rs)
+    old_intranet = """        let local_addr = socket.local_addr();
         // we saw invalid local_addr while using proxy, local_addr.ip() == "::1"
         let local_addr: SocketAddr =
             format!("{}:{}", local_addr.ip(), local_addr.port()).parse()?;"""
-        new_local = """        let local_addr = socket.local_addr();
-        if let std::net::IpAddr::V4(v4) = local_addr.ip() {
-            let oct = v4.octets();
-            if oct[0] == 198 && (oct[1] == 18 || oct[1] == 19) {
+    new_intranet = """        let local_addr = socket.local_addr();
+        if hbb_common::config::is_tun_fake_ip(&local_addr.ip()) {
+            let Some(lan_v4) = crate::common::resolve_non_tun_lan_ipv4() else {
                 bail!("Skip intranet listen on TUN fake-IP {}", local_addr);
+            };
+            let lan_bind = SocketAddr::new(std::net::IpAddr::V4(lan_v4), 0);
+            let listener = hbb_common::tcp::new_listener(lan_bind, false).await?;
+            let lan_addr = listener.local_addr()?;
+            let mut msg_out = Message::new();
+            msg_out.set_local_addr(LocalAddr {
+                id: Config::get_id(),
+                socket_addr: AddrMangle::encode(peer_addr).into(),
+                local_addr: AddrMangle::encode(lan_addr).into(),
+                relay_server,
+                version: crate::VERSION.to_owned(),
+                socket_addr_v6,
+                ..Default::default()
+            });
+            let bytes = msg_out.write_to_bytes()?;
+            socket.send_raw(bytes).await?;
+            drop(socket);
+            if let Ok(Ok((stream, addr))) =
+                hbb_common::timeout(CONNECT_TIMEOUT, listener.accept()).await
+            {
+                drop(slot);
+                accept_punched_connection(server, stream, addr, meta).await;
+            } else {
+                drop(slot);
             }
+            return Ok(());
         }
         // we saw invalid local_addr while using proxy, local_addr.ip() == "::1"
         let local_addr: SocketAddr =
             format!("{}:{}", local_addr.ip(), local_addr.port()).parse()?;"""
-        if "Skip intranet listen on TUN fake-IP" in txt:
-            print("[rrremote] TUN fake-IP intranet guard already patched in src/rendezvous_mediator.rs.")
-        elif old_local in txt:
-            txt = txt.replace(old_local, new_local, 1)
-            write_text(med_rs, txt)
-            print("[rrremote] Added TUN fake-IP intranet guard in src/rendezvous_mediator.rs.")
-        else:
-            raise RuntimeError("Failed to locate handle_intranet_ local_addr in src/rendezvous_mediator.rs")
+    if "crate::common::resolve_non_tun_lan_ipv4()" in mtxt:
+        print("[rrremote] TUN fake-IP LAN listener fallback already patched in src/rendezvous_mediator.rs.")
+    elif old_intranet in mtxt:
+        mtxt = mtxt.replace(old_intranet, new_intranet, 1)
+        write_text(med_rs, mtxt)
+        print("[rrremote] Added TUN fake-IP physical LAN listener fallback in src/rendezvous_mediator.rs.")
+    else:
+        raise RuntimeError("Failed to locate handle_intranet_ local_addr in src/rendezvous_mediator.rs")
+
+    # 4. Controller outbound TCP source-IP guard in src/client.rs:
+    #    When the controller's hbbs socket used a TUN fake-IP, do not bind outbound LAN/TCP dials
+    #    to the TUN fake-IP (let the OS route via the physical LAN NIC).
+    client_rs = root / "src" / "client.rs"
+    if not client_rs.exists():
+        raise FileNotFoundError(f"Expected {client_rs}")
+    cltxt = read_text(client_rs)
+    old_dial = (
+        "        if allow_tcp_punch {\n"
+        "            let fut = connect_tcp_local(peer, Some(local_addr), connect_timeout);"
+    )
+    new_dial = (
+        "        if allow_tcp_punch {\n"
+        "            let bind_local = if hbb_common::config::is_tun_fake_ip(&local_addr.ip()) {\n"
+        "                None\n"
+        "            } else {\n"
+        "                Some(local_addr)\n"
+        "            };\n"
+        "            let fut = connect_tcp_local(peer, bind_local, connect_timeout);"
+    )
+    if "let bind_local = if hbb_common::config::is_tun_fake_ip(&local_addr.ip())" in cltxt:
+        print("[rrremote] Controller outbound TUN source-IP guard already patched in src/client.rs.")
+    elif old_dial in cltxt:
+        cltxt = cltxt.replace(old_dial, new_dial, 1)
+        write_text(client_rs, cltxt)
+        print("[rrremote] Guarded controller outbound TCP dial against binding TUN fake-IP in src/client.rs.")
+    else:
+        raise RuntimeError("Failed to locate allow_tcp_punch connect_tcp_local in src/client.rs")
 
 
 def main() -> int:
     root = Path(sys.argv[1]).resolve() if len(sys.argv) > 1 else Path.cwd()
     display_name = os.environ.get("APP_DISPLAY_NAME", "RRRemote").strip()
     update_repo = os.environ.get("UPDATE_REPO", "melotusme/RRRemote").strip()
-    build_tag = os.environ.get("RR_BUILD_TAG", "v1.5.3-rr6").strip()
+    build_tag = os.environ.get("RR_BUILD_TAG", "v1.5.3-rr7").strip()
     rendezvous = os.environ.get("RR_RENDEZVOUS_SERVER", "").strip()
     pub_key = os.environ.get("RR_PUB_KEY", "").strip()
     api_server = os.environ.get("RR_API_SERVER", "").strip()
@@ -920,16 +1535,17 @@ def main() -> int:
         "enabled" if (rendezvous or pub_key or api_server) else "disabled (configure in-app)",
     )
 
-    patch_hbb_common_config(root, display_name, rendezvous, pub_key, api_server)
+    patch_hbb_common_config(root, display_name, update_repo, rendezvous, pub_key, api_server)
+    patch_macos_video_reliability(root)
     patch_update_checker(root, update_repo, build_tag)
     patch_updater_artifact_resolver(root, update_repo)
     patch_default_api_server_fallback(root, api_server)
     patch_personal_ergonomics(root)
-    patch_display_branding(root, display_name)
+    patch_display_branding(root, display_name, update_repo)
     apply_brand_icons(root)
 
     ui_script = Path(__file__).resolve().parent / "apply_ui_polish.py"
-    if ui_script.exists():
+    if ui_script.exists() and os.environ.get("RR_SKIP_UI_POLISH", "") != "1":
         env = os.environ.copy()
         env["UPDATE_REPO"] = update_repo
         subprocess.run([sys.executable, str(ui_script), str(root)], check=True, env=env)
