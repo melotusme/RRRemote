@@ -3158,6 +3158,12 @@ def main() -> int:
     patch_updater_artifact_resolver(root, update_repo)
     patch_default_api_server_fallback(root, api_server)
     patch_personal_ergonomics(root)
+    script_dir = str(Path(__file__).resolve().parent)
+    if script_dir not in sys.path:
+        sys.path.insert(0, script_dir)
+    from p2p_lan_direct import patch_lan_direct_fastpath
+
+    patch_lan_direct_fastpath(root)
     patch_display_branding(root, display_name, update_repo)
     apply_brand_icons(root)
 
