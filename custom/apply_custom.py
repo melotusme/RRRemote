@@ -3138,7 +3138,7 @@ def main() -> int:
     root = Path(sys.argv[1]).resolve() if len(sys.argv) > 1 else Path.cwd()
     display_name = os.environ.get("APP_DISPLAY_NAME", "RRRemote").strip()
     update_repo = os.environ.get("UPDATE_REPO", "melotusme/RRRemote").strip()
-    build_tag = os.environ.get("RR_BUILD_TAG", "v1.5.3-rr10").strip()
+    build_tag = os.environ.get("RR_BUILD_TAG", "v1.5.3-rr11").strip()
     rendezvous = os.environ.get("RR_RENDEZVOUS_SERVER", "").strip()
     pub_key = os.environ.get("RR_PUB_KEY", "").strip()
     api_server = os.environ.get("RR_API_SERVER", "").strip()
